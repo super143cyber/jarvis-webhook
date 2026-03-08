@@ -431,7 +431,8 @@ def research_endpoint():
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "healthy", "version": "5.0.0", "service": "JARVIS Unified Tool Handler", "features": ["manus-deep-research", "telegram-delivery"]}), 200
+    manus_key_set = bool(os.environ.get("MANUS_API_KEY", ""))
+    return jsonify({"status": "healthy", "version": "5.0.0", "service": "JARVIS Unified Tool Handler", "features": ["manus-deep-research", "telegram-delivery"], "manus_api_key_configured": manus_key_set}), 200
 
 
 @app.route("/", methods=["GET"])
