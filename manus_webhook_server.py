@@ -268,6 +268,7 @@ def search_proxy():
         summary = "\n".join(summary_parts) if summary_parts else "No results found."
 
         return jsonify({
+            "result": summary,
             "results": results,
             "summary": summary,
             "query": query,
@@ -331,6 +332,7 @@ def crypto_proxy():
         )
 
         return jsonify({
+            "result": summary,
             "coin": coin_id,
             "currency": currency,
             "price": price,
@@ -525,7 +527,7 @@ def health():
     return jsonify({
         "status": "healthy",
         "service": "JARVIS Webhook + Tool Proxy Server",
-        "version": "2.1.0",
+        "version": "2.2.0",
         "port": PORT,
         "endpoints": {
             "/webhook/manus": "POST — Manus task events → Telegram",
@@ -541,7 +543,7 @@ def health():
 def root():
     return jsonify({
         "service": "JARVIS Webhook + Tool Proxy Server",
-        "version": "2.1.0",
+        "version": "2.2.0",
         "endpoints": {
             "GET  /":               "This page",
             "GET  /health":         "Health check",
