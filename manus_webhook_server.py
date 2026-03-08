@@ -1,7 +1,8 @@
 """
-JARVIS Unified Tool Handler v4.0
+JARVIS Unified Tool Handler v5.1.0
 Correct Vapi response format: {"results": [{"toolCallId": "...", "result": "..."}]}
 Direct API calls - no passthrough, no Brave.
+Fix: Added /vapi-events endpoint for serverUrl. All 6 tools point to /tools.
 """
 
 import os
@@ -285,6 +286,21 @@ def unified_tools():
         return vapi_response(call_id, f"I'm having trouble fetching the {tool_friendly} data right now, Sir. Please try again in a moment.")
 
 
+@app.route("/vapi-events", methods=["POST"])
+def vapi_events():
+    """Handle Vapi server-url events (call status, transcripts, end-of-call, etc.)
+    This endpoint is set as the assistant's serverUrl in Vapi.
+    It must return 200 quickly to avoid call drops."""
+    data = request.get_json(force=True) or {}
+    msg = data.get("message", {})
+    event_type = msg.get("type", "unknown")
+    call_info = msg.get("call", {})
+    call_id = call_info.get("id", "unknown") if isinstance(call_info, dict) else "unknown"
+    log.info(f"Vapi server event: {event_type} | call: {call_id}")
+    # Always return 200 OK immediately for all server events
+    return jsonify({"received": True}), 200
+
+
 @app.route("/webhook/manus", methods=["POST"])
 def manus_webhook():
     data = request.get_json(force=True) or {}
@@ -432,12 +448,12 @@ def research_endpoint():
 @app.route("/health", methods=["GET"])
 def health():
     manus_key_set = bool(os.environ.get("MANUS_API_KEY", ""))
-    return jsonify({"status": "healthy", "version": "5.0.0", "service": "JARVIS Unified Tool Handler", "features": ["manus-deep-research", "telegram-delivery"], "manus_api_key_configured": manus_key_set}), 200
+    return jsonify({"status": "healthy", "version": "5.1.0", "service": "JARVIS Unified Tool Handler", "features": ["manus-deep-research", "telegram-delivery"], "manus_api_key_configured": manus_key_set}), 200
 
 
 @app.route("/", methods=["GET"])
 def root():
-    return jsonify({"service": "JARVIS Unified Tool Handler", "version": "5.0.0", "endpoint": "POST /tools", "features": ["manus-deep-research", "telegram-delivery"]}), 200
+    return jsonify({"service": "JARVIS Unified Tool Handler", "version": "5.1.0", "endpoints": {"tools": "POST /tools", "events": "POST /vapi-events"}, "features": ["manus-deep-research", "telegram-delivery"]}), 200
 
 
 if __name__ == "__main__":
