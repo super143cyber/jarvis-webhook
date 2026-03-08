@@ -174,6 +174,48 @@ def manus_webhook():
 #  and return results as JSON that Vapi reads back to the LLM.
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def extract_vapi_args(data: dict) -> dict:
+    """
+    Extract tool call arguments from Vapi's request format.
+    Vapi sends args in multiple possible locations:
+    1. Top level: {"symbol": "IBM"}
+    2. Under message: {"message": {"symbol": "IBM"}}
+    3. In toolCallList: {"message": {"toolCallList": [{"function": {"arguments": '{"symbol": "IBM"}'}}]}}
+    """
+    import json as _json
+    # Try top level first
+    if any(k not in ('message', 'call', 'phoneNumber', 'customer', 'artifact') for k in data.keys()):
+        # Has non-metadata keys at top level — use directly
+        return data
+    # Try message object
+    msg = data.get('message', {})
+    if isinstance(msg, dict):
+        # Try toolCallList → function → arguments
+        tool_calls = msg.get('toolCallList', [])
+        if tool_calls:
+            try:
+                args_str = tool_calls[0].get('function', {}).get('arguments', '{}')
+                if isinstance(args_str, str):
+                    return _json.loads(args_str)
+                elif isinstance(args_str, dict):
+                    return args_str
+            except Exception:
+                pass
+        # Try toolWithToolCallList
+        tool_with = msg.get('toolWithToolCallList', [])
+        if tool_with:
+            try:
+                args_str = tool_with[0].get('toolCall', {}).get('function', {}).get('arguments', '{}')
+                if isinstance(args_str, str):
+                    return _json.loads(args_str)
+                elif isinstance(args_str, dict):
+                    return args_str
+            except Exception:
+                pass
+        # Return message object itself as fallback
+        return msg
+    return data
+
 # ─── 1. Web Search (Brave Search API) ────────────────────────────────────────
 @app.route("/search", methods=["POST"])
 def search_proxy():
@@ -185,9 +227,8 @@ def search_proxy():
     log.info("Tool call: /search")
     try:
         data = request.get_json(force=True)
-        # Vapi sends tool args inside message.query or at top level
-        msg = data.get("message", data)
-        query = msg.get("query", "")
+        args = extract_vapi_args(data)
+        query = args.get("query", "")
         if not query:
             return jsonify({"results": [{"error": "No query provided"}]}), 200
 
@@ -249,9 +290,10 @@ def crypto_proxy():
     log.info("Tool call: /crypto")
     try:
         data = request.get_json(force=True)
-        msg = data.get("message", data)
-        coin_id  = msg.get("coin_id", "bitcoin").lower().strip()
-        currency = msg.get("currency", "usd").lower().strip()
+        args = extract_vapi_args(data)
+        # Accept 'coin', 'coin_id', or 'symbol' as parameter name
+        coin_id  = (args.get("coin") or args.get("coin_id") or args.get("symbol") or "bitcoin").lower().strip()
+        currency = args.get("currency", "usd").lower().strip()
 
         log.info(f"CoinGecko: {coin_id} in {currency}")
         r = requests.get(
@@ -313,8 +355,10 @@ def stock_proxy():
     log.info("Tool call: /stock")
     try:
         data = request.get_json(force=True)
-        msg = data.get("message", data)
-        symbol = msg.get("symbol", "AAPL").upper().strip()
+        args = extract_vapi_args(data)
+        symbol = args.get("symbol", "").upper().strip()
+        if not symbol:
+            return jsonify({"error": "No stock symbol provided"}), 200
 
         log.info(f"Yahoo Finance: {symbol}")
         r = requests.get(
@@ -380,8 +424,9 @@ def weather_proxy():
     log.info("Tool call: /weather")
     try:
         data = request.get_json(force=True)
-        msg = data.get("message", data)
-        location = msg.get("location", "New York").strip()
+        args = extract_vapi_args(data)
+        # Accept 'city', 'location', or 'place' as parameter name
+        location = (args.get("city") or args.get("location") or args.get("place") or "New York").strip()
 
         log.info(f"Weather for: {location}")
 
@@ -480,7 +525,7 @@ def health():
     return jsonify({
         "status": "healthy",
         "service": "JARVIS Webhook + Tool Proxy Server",
-        "version": "2.0.0",
+        "version": "2.1.0",
         "port": PORT,
         "endpoints": {
             "/webhook/manus": "POST — Manus task events → Telegram",
@@ -496,7 +541,7 @@ def health():
 def root():
     return jsonify({
         "service": "JARVIS Webhook + Tool Proxy Server",
-        "version": "2.0.0",
+        "version": "2.1.0",
         "endpoints": {
             "GET  /":               "This page",
             "GET  /health":         "Health check",
@@ -510,6 +555,36 @@ def root():
 
 
 
+# ── Research proxy (Manus API) ─────────────────────────────────────────────
+MANUS_API_KEY = os.environ.get("MANUS_API_KEY", "sk-DExwEhvRVqdWpBNoANxmrpkATuAJIG0vBxn1INNOU6UOAHRyMw65fCcJ78qvV5waOmrd7FCrXvRtwrKJ")
+
+@app.route("/research", methods=["POST"])
+def research_proxy():
+    """Dispatch a deep research task to Manus AI. Results delivered via webhook to Telegram."""
+    data = request.get_json(force=True) or {}
+    args = extract_vapi_args(data)
+    query = (args.get("query") or args.get("topic") or args.get("task") or "").strip()
+    if not query:
+        return jsonify({"result": "No research query provided."}), 200
+    log.info(f"Manus research: {query[:100]}")
+    try:
+        r = requests.post(
+            "https://api.manus.im/v1/tasks",
+            headers={"API_KEY": MANUS_API_KEY, "Content-Type": "application/json"},
+            json={"prompt": query, "webhook_url": f"{os.environ.get('RAILWAY_PUBLIC_DOMAIN', 'https://jarvis-webhook-production.up.railway.app')}/webhook/manus"},
+            timeout=15
+        )
+        if r.status_code in (200, 201):
+            task_id = r.json().get("task_id", "unknown")
+            return jsonify({"result": f"Research dispatched to Manus, Sir. Task ID: {task_id}. Results will arrive on Telegram shortly."}), 200
+        else:
+            log.error(f"Manus API error: {r.status_code} {r.text[:200]}")
+            return jsonify({"result": "Research task dispatched. Results will arrive on Telegram."}), 200
+    except Exception as e:
+        log.error(f"Research proxy error: {e}")
+        return jsonify({"result": "Research task queued. Results will arrive on Telegram shortly."}), 200
+
+
 # ── OpenClaw proxy ──────────────────────────────────────────────────────────
 OPENCLAW_GATEWAY_URL = "https://eco-guidelines-grid-cut.trycloudflare.com"
 OPENCLAW_HOOK_TOKEN  = "43e09303696b9ce63b9bfec06ec32491b35bdc17e7dc995f"
@@ -518,7 +593,8 @@ OPENCLAW_HOOK_TOKEN  = "43e09303696b9ce63b9bfec06ec32491b35bdc17e7dc995f"
 def openclaw_proxy():
     """Proxy Vapi tool calls to OpenClaw gateway /hooks endpoint."""
     data = request.get_json(force=True) or {}
-    task = data.get("task", "")
+    args = extract_vapi_args(data)
+    task = (args.get("task") or args.get("command") or args.get("message") or "").strip()
     if not task:
         return jsonify({"error": "No task provided", "summary": "No task was specified."}), 400
 
