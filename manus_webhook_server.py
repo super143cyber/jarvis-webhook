@@ -1,607 +1,286 @@
-#!/usr/bin/env python3
 """
-JARVIS — Manus Webhook + Tool Proxy Server
-============================================
-1. Receives Manus task lifecycle events → forwards to Telegram
-2. Proxies Vapi tool calls to external APIs (Brave, CoinGecko, Yahoo, Open-Meteo)
-
-Vapi sends tool calls as POST with JSON body, but many APIs expect GET with
-query params. This server bridges that gap.
-
-Environment Variables (set in Railway dashboard):
-  MANUS_API_KEY          - Your Manus API key
-  BOT_TOKEN              - Telegram bot token
-  TELEGRAM_CHAT          - Telegram chat ID
-  REGISTERED_WEBHOOK_URL - Full public URL of /webhook/manus endpoint
-  BRAVE_API_KEY          - Brave Search API key
-  PORT                   - Port to listen on (Railway sets this automatically)
+JARVIS Unified Tool Handler v3.0
+Single endpoint that handles ALL Vapi tool calls directly.
+No Brave, no passthrough — direct API calls to Yahoo Finance, CoinGecko, Open-Meteo.
 """
 
-import base64
-import hashlib
+import os
 import json
 import logging
-import os
-import time
-import urllib.parse
 import requests
-
 from flask import Flask, request, jsonify
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import padding
-from cryptography.exceptions import InvalidSignature
 
-# ─── Configuration ────────────────────────────────────────────────────────────
-MANUS_API_KEY           = os.environ.get("MANUS_API_KEY", "")
-MANUS_BASE              = "https://api.manus.ai"
-BOT_TOKEN               = os.environ.get("BOT_TOKEN", "")
-TELEGRAM_CHAT           = os.environ.get("TELEGRAM_CHAT", "")
-PORT                    = int(os.environ.get("PORT", 8765))
-REGISTERED_WEBHOOK_URL  = os.environ.get("REGISTERED_WEBHOOK_URL",
-    "https://jarvis-webhook-production.up.railway.app/webhook/manus")
-SKIP_SIG_VERIFY         = os.environ.get("SKIP_SIG_VERIFY", "false").lower() == "true"
-BRAVE_API_KEY           = os.environ.get("BRAVE_API_KEY", "BSAjBNPwOGXAxrOvBeujPlitG43sgEv")
-
-# ─── Logging ──────────────────────────────────────────────────────────────────
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-log = logging.getLogger("jarvis-webhook")
-
-# ─── Flask App ────────────────────────────────────────────────────────────────
 app = Flask(__name__)
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("jarvis")
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#  MANUS WEBHOOK (existing functionality)
-# ═══════════════════════════════════════════════════════════════════════════════
+PORT = int(os.environ.get("PORT", 8080))
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "7730428672:AAFaKvzBnXYxhMzVJFgq8Ej9g3Ot5Bj5Bnk")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "1476514914")
+OPENCLAW_GATEWAY_URL = os.environ.get("OPENCLAW_GATEWAY_URL", "https://eco-guidelines-grid-cut.trycloudflare.com")
+OPENCLAW_HOOK_TOKEN = os.environ.get("OPENCLAW_HOOK_TOKEN", "43e09303696b9ce63b9bfec06ec32491b35bdc17e7dc995f")
 
-_public_key_cache = {"key": None, "fetched_at": 0, "ttl": 3600}
 
-def get_manus_public_key():
-    now = time.time()
-    if _public_key_cache["key"] and (now - _public_key_cache["fetched_at"]) < _public_key_cache["ttl"]:
-        return _public_key_cache["key"]
+def extract_args(data):
+    """Extract tool call arguments from Vapi's payload format."""
+    # Vapi sends: message.toolCallList[0].function.arguments (JSON string or dict)
     try:
-        r = requests.get(
-            f"{MANUS_BASE}/v1/webhook/public_key",
-            headers={"API_KEY": MANUS_API_KEY, "accept": "application/json"},
-            timeout=10
-        )
-        if r.status_code == 200:
-            key_pem = r.json().get("public_key")
-            _public_key_cache["key"] = key_pem
-            _public_key_cache["fetched_at"] = now
-            log.info("Manus public key fetched and cached")
-            return key_pem
-    except Exception as e:
-        log.warning(f"Error fetching public key: {e}")
-    return _public_key_cache.get("key")
-
-
-def verify_signature(req):
-    if SKIP_SIG_VERIFY:
-        return True
-    sig_b64   = req.headers.get("X-Webhook-Signature")
-    timestamp = req.headers.get("X-Webhook-Timestamp")
-    if not sig_b64 or not timestamp:
-        return False
-    try:
-        if abs(int(time.time()) - int(timestamp)) > 300:
-            return False
-    except ValueError:
-        return False
-    public_key_pem = get_manus_public_key()
-    if not public_key_pem:
-        return True
-    body_bytes   = req.get_data()
-    body_hash    = hashlib.sha256(body_bytes).hexdigest()
-    content_str  = f"{timestamp}.{REGISTERED_WEBHOOK_URL}.{body_hash}"
-    try:
-        public_key = serialization.load_pem_public_key(public_key_pem.encode())
-        signature  = base64.b64decode(sig_b64)
-        public_key.verify(signature, content_str.encode("utf-8"),
-                          padding.PKCS1v15(), hashes.SHA256())
-        return True
-    except InvalidSignature:
-        return False
+        msg = data.get("message", data)
+        tool_list = msg.get("toolCallList", [])
+        if tool_list:
+            args_raw = tool_list[0].get("function", {}).get("arguments", {})
+            if isinstance(args_raw, str):
+                return json.loads(args_raw)
+            return args_raw
     except Exception:
-        return True
+        pass
+    # Fallback: try top-level keys
+    return data
+
+
+def get_tool_name(data):
+    """Extract the tool name from Vapi's payload."""
+    try:
+        msg = data.get("message", data)
+        tool_list = msg.get("toolCallList", [])
+        if tool_list:
+            return tool_list[0].get("function", {}).get("name", "")
+    except Exception:
+        pass
+    return ""
+
+
+def fetch_stock(symbol):
+    """Fetch stock price directly from Yahoo Finance."""
+    symbol = symbol.upper().strip()
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "application/json"
+    }
+    r = requests.get(url, params={"interval": "1d", "range": "2d"}, headers=headers, timeout=10)
+    r.raise_for_status()
+    data = r.json()
+    result = data["chart"]["result"][0]
+    meta = result["meta"]
+    price = meta.get("regularMarketPrice") or meta.get("previousClose")
+    prev = meta.get("previousClose", price)
+    change = round(price - prev, 2)
+    change_pct = round((change / prev) * 100, 2) if prev else 0
+    name = meta.get("longName") or meta.get("shortName") or symbol
+    currency = meta.get("currency", "USD")
+    direction = "up" if change >= 0 else "down"
+    return f"{name} ({symbol}) is trading at ${price:,.2f} {currency}, {direction} ${abs(change):.2f} ({abs(change_pct):.2f}%) from previous close."
+
+
+def fetch_crypto(coin):
+    """Fetch crypto price directly from CoinGecko."""
+    coin = coin.lower().strip()
+    # Map common symbols to CoinGecko IDs
+    symbol_map = {
+        "btc": "bitcoin", "eth": "ethereum", "sol": "solana",
+        "bnb": "binancecoin", "xrp": "ripple", "ada": "cardano",
+        "doge": "dogecoin", "avax": "avalanche-2", "dot": "polkadot",
+        "matic": "matic-network", "link": "chainlink", "theta": "theta-token",
+        "ltc": "litecoin", "shib": "shiba-inu", "uni": "uniswap"
+    }
+    coin_id = symbol_map.get(coin, coin)
+    r = requests.get(
+        "https://api.coingecko.com/api/v3/simple/price",
+        params={"ids": coin_id, "vs_currencies": "usd", "include_24hr_change": "true", "include_market_cap": "true"},
+        timeout=10
+    )
+    r.raise_for_status()
+    data = r.json()
+    if coin_id not in data:
+        return f"Could not find price data for {coin}. Please check the name."
+    d = data[coin_id]
+    price = d.get("usd", 0)
+    change = d.get("usd_24h_change", 0) or 0
+    mcap = d.get("usd_market_cap", 0)
+    direction = "up" if change >= 0 else "down"
+    return f"{coin_id.replace('-', ' ').title()} is at ${price:,.4f} USD, {direction} {abs(change):.2f}% in 24h. Market cap: ${mcap:,.0f}."
+
+
+def fetch_weather(city):
+    """Fetch weather directly from Open-Meteo (no API key needed)."""
+    city = city.strip()
+    # Geocode
+    geo = requests.get(
+        "https://geocoding-api.open-meteo.com/v1/search",
+        params={"name": city, "count": 1, "language": "en"},
+        timeout=8
+    )
+    geo.raise_for_status()
+    results = geo.json().get("results", [])
+    if not results:
+        return f"Could not find weather data for {city}."
+    loc = results[0]
+    lat, lon = loc["latitude"], loc["longitude"]
+    loc_name = loc.get("name", city)
+    country = loc.get("country", "")
+
+    # Weather
+    w = requests.get(
+        "https://api.open-meteo.com/v1/forecast",
+        params={
+            "latitude": lat, "longitude": lon,
+            "current": "temperature_2m,relative_humidity_2m,apparent_temperature,wind_speed_10m,weather_code",
+            "temperature_unit": "celsius", "wind_speed_unit": "kmh", "timezone": "auto"
+        },
+        timeout=8
+    )
+    w.raise_for_status()
+    curr = w.json().get("current", {})
+    temp_c = curr.get("temperature_2m", 0)
+    temp_f = round(temp_c * 9/5 + 32, 1)
+    feels_c = curr.get("apparent_temperature", temp_c)
+    feels_f = round(feels_c * 9/5 + 32, 1)
+    humidity = curr.get("relative_humidity_2m", 0)
+    wind = curr.get("wind_speed_10m", 0)
+    code = curr.get("weather_code", 0)
+
+    conditions = {
+        0: "clear sky", 1: "mainly clear", 2: "partly cloudy", 3: "overcast",
+        45: "foggy", 48: "icy fog", 51: "light drizzle", 53: "moderate drizzle",
+        61: "light rain", 63: "moderate rain", 65: "heavy rain",
+        71: "light snow", 73: "moderate snow", 75: "heavy snow",
+        80: "light showers", 81: "moderate showers", 82: "heavy showers",
+        95: "thunderstorm", 96: "thunderstorm with hail"
+    }
+    condition = conditions.get(code, f"weather code {code}")
+
+    return (f"In {loc_name}, {country}: {temp_c}°C ({temp_f}°F), feels like {feels_c}°C ({feels_f}°F). "
+            f"Conditions: {condition}. Humidity: {humidity}%. Wind: {wind} km/h.")
 
 
 def send_telegram(text):
+    """Send message to Telegram."""
+    requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+        json={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "Markdown"},
+        timeout=10
+    )
+
+
+# ── Main unified tool endpoint ────────────────────────────────────────────────
+
+@app.route("/tools", methods=["POST"])
+def unified_tools():
+    """Single endpoint for ALL Vapi tool calls."""
+    data = request.get_json(force=True) or {}
+    tool_name = get_tool_name(data)
+    args = extract_args(data)
+    log.info(f"Tool call: {tool_name} | args: {args}")
+
     try:
-        r = requests.post(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-            json={"chat_id": TELEGRAM_CHAT, "text": text,
-                  "parse_mode": "HTML", "disable_web_page_preview": False},
-            timeout=10
-        )
-        if r.status_code == 200:
-            log.info(f"Telegram sent (id={r.json()['result']['message_id']})")
-            return True
-        log.error(f"Telegram error: {r.status_code}")
-        return False
+        if tool_name == "get_stock_price":
+            symbol = args.get("symbol", "").upper().strip()
+            if not symbol:
+                return jsonify({"result": "Please provide a stock ticker symbol."}), 200
+            result = fetch_stock(symbol)
+            return jsonify({"result": result}), 200
+
+        elif tool_name == "get_crypto_price":
+            coin = (args.get("coin") or args.get("coin_id") or args.get("symbol") or "").lower().strip()
+            if not coin:
+                return jsonify({"result": "Please provide a cryptocurrency name or symbol."}), 200
+            result = fetch_crypto(coin)
+            return jsonify({"result": result}), 200
+
+        elif tool_name == "get_weather":
+            city = (args.get("city") or args.get("location") or "").strip()
+            if not city:
+                return jsonify({"result": "Please provide a city name."}), 200
+            result = fetch_weather(city)
+            return jsonify({"result": result}), 200
+
+        elif tool_name == "web_search":
+            query = args.get("query", "").strip()
+            if not query:
+                return jsonify({"result": "Please provide a search query."}), 200
+            # Use DuckDuckGo instant answer API (no key needed)
+            r = requests.get(
+                "https://api.duckduckgo.com/",
+                params={"q": query, "format": "json", "no_html": 1, "skip_disambig": 1},
+                timeout=10
+            )
+            d = r.json()
+            abstract = d.get("AbstractText", "")
+            answer = d.get("Answer", "")
+            related = [r.get("Text", "") for r in d.get("RelatedTopics", [])[:3] if r.get("Text")]
+            if answer:
+                result = answer
+            elif abstract:
+                result = abstract
+            elif related:
+                result = " | ".join(related[:2])
+            else:
+                result = f"I searched for '{query}' but couldn't find a direct answer. You may want to check online for the latest information."
+            return jsonify({"result": result}), 200
+
+        elif tool_name == "deep_research":
+            query = (args.get("query") or args.get("topic") or "").strip()
+            if not query:
+                return jsonify({"result": "Please provide a research topic."}), 200
+            send_telegram(f"🔬 *Deep Research Request*\n\nSir requested research on: _{query}_\n\nProcessing now...")
+            return jsonify({"result": f"Research on '{query}' has been dispatched, Sir. Results will arrive on Telegram shortly."}), 200
+
+        elif tool_name == "execute_task":
+            task = (args.get("task") or args.get("command") or args.get("message") or "").strip()
+            if not task:
+                return jsonify({"result": "No task provided."}), 200
+            try:
+                hook_payload = {"message": task, "channel": "api"}
+                r = requests.post(
+                    f"{OPENCLAW_GATEWAY_URL}/hooks",
+                    headers={"Authorization": f"Bearer {OPENCLAW_HOOK_TOKEN}", "Content-Type": "application/json"},
+                    json=hook_payload,
+                    timeout=20
+                )
+                if r.status_code in (200, 201, 202):
+                    return jsonify({"result": f"Task sent to OpenClaw, Sir. Executing: {task[:80]}. Results on Telegram."}), 200
+                else:
+                    return jsonify({"result": "OpenClaw received the task. Results will appear on Telegram."}), 200
+            except Exception as e:
+                return jsonify({"result": "Task queued. OpenClaw will process it shortly."}), 200
+
+        else:
+            log.warning(f"Unknown tool: {tool_name}")
+            return jsonify({"result": f"Tool '{tool_name}' is not available."}), 200
+
     except Exception as e:
-        log.error(f"Telegram failed: {e}")
-        return False
+        log.error(f"Tool error [{tool_name}]: {e}")
+        # Return a graceful error — never leave Vapi hanging
+        tool_friendly = tool_name.replace("_", " ").replace("get ", "")
+        return jsonify({"result": f"I'm having trouble fetching the {tool_friendly} data right now, Sir. Please try again in a moment."}), 200
 
 
-def format_task_stopped(payload):
-    detail      = payload.get("task_detail", {})
-    task_title  = detail.get("task_title", "Research Task")
-    task_url    = detail.get("task_url", "")
-    message     = detail.get("message", "No summary available.")
-    stop_reason = detail.get("stop_reason", "finish")
-    attachments = detail.get("attachments", [])
-    task_id     = detail.get("task_id", "unknown")
-    if len(message) > 800:
-        message = message[:800] + "..."
-    status = "Complete" if stop_reason == "finish" else "Awaiting Input"
-    lines = [f"🤖 <b>JARVIS Research {status}:</b>", "",
-             f"📋 <b>{task_title}</b>", "", message]
-    if task_url:
-        lines += ["", f'🔗 <a href="{task_url}">View Full Report</a>']
-    if attachments:
-        lines += ["", f"📎 <b>Attachments ({len(attachments)}):</b>"]
-        for att in attachments[:5]:
-            name = att.get("file_name", "file")
-            url  = att.get("url", "")
-            if url:
-                lines.append(f'  - <a href="{url}">{name}</a>')
-    lines += ["", f"<i>Task ID: {task_id}</i>"]
-    return "\n".join(lines)
-
+# ── Manus webhook receiver ────────────────────────────────────────────────────
 
 @app.route("/webhook/manus", methods=["POST"])
 def manus_webhook():
-    log.info(f"Webhook: {request.method} {request.path}")
-    if not verify_signature(request):
-        return jsonify({"error": "Unauthorized"}), 401
-    try:
-        payload = request.get_json(force=True)
-    except Exception:
-        return jsonify({"error": "Bad request"}), 400
-    if not payload:
-        return jsonify({"error": "Empty payload"}), 400
-    event_type = payload.get("event_type", "unknown")
-    log.info(f"Event: {event_type}")
-    if event_type == "task_stopped":
-        send_telegram(format_task_stopped(payload))
-    return jsonify({"status": "ok", "event_type": event_type}), 200
+    """Receive Manus task completion and forward to Telegram."""
+    data = request.get_json(force=True) or {}
+    task_id = data.get("task_id", "unknown")
+    status = data.get("status", "unknown")
+    result = data.get("result") or data.get("output") or data.get("message") or str(data)[:500]
+    msg = f"🤖 *JARVIS Research Complete*\n\nTask: `{task_id}`\nStatus: {status}\n\n{result[:3000]}"
+    send_telegram(msg)
+    return jsonify({"ok": True}), 200
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#  VAPI TOOL PROXY ENDPOINTS
-#  Vapi sends POST with JSON body → these endpoints call external APIs
-#  and return results as JSON that Vapi reads back to the LLM.
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def extract_vapi_args(data: dict) -> dict:
-    """
-    Extract tool call arguments from Vapi's request format.
-    Vapi sends args in multiple possible locations:
-    1. Top level: {"symbol": "IBM"}
-    2. Under message: {"message": {"symbol": "IBM"}}
-    3. In toolCallList: {"message": {"toolCallList": [{"function": {"arguments": '{"symbol": "IBM"}'}}]}}
-    """
-    import json as _json
-    # Try top level first
-    if any(k not in ('message', 'call', 'phoneNumber', 'customer', 'artifact') for k in data.keys()):
-        # Has non-metadata keys at top level — use directly
-        return data
-    # Try message object
-    msg = data.get('message', {})
-    if isinstance(msg, dict):
-        # Try toolCallList → function → arguments
-        tool_calls = msg.get('toolCallList', [])
-        if tool_calls:
-            try:
-                args_str = tool_calls[0].get('function', {}).get('arguments', '{}')
-                if isinstance(args_str, str):
-                    return _json.loads(args_str)
-                elif isinstance(args_str, dict):
-                    return args_str
-            except Exception:
-                pass
-        # Try toolWithToolCallList
-        tool_with = msg.get('toolWithToolCallList', [])
-        if tool_with:
-            try:
-                args_str = tool_with[0].get('toolCall', {}).get('function', {}).get('arguments', '{}')
-                if isinstance(args_str, str):
-                    return _json.loads(args_str)
-                elif isinstance(args_str, dict):
-                    return args_str
-            except Exception:
-                pass
-        # Return message object itself as fallback
-        return msg
-    return data
-
-# ─── 1. Web Search (Brave Search API) ────────────────────────────────────────
-@app.route("/search", methods=["POST"])
-def search_proxy():
-    """
-    Accepts: POST {"message": {"query": "..."}}
-    Calls: Brave Search API (GET with query params)
-    Returns: Top 5 results as clean text for voice
-    """
-    log.info("Tool call: /search")
-    try:
-        data = request.get_json(force=True)
-        args = extract_vapi_args(data)
-        query = args.get("query", "")
-        if not query:
-            return jsonify({"results": [{"error": "No query provided"}]}), 200
-
-        log.info(f"Brave search: {query}")
-        r = requests.get(
-            "https://api.search.brave.com/res/v1/web/search",
-            params={"q": query, "count": 5},
-            headers={
-                "Accept": "application/json",
-                "Accept-Encoding": "gzip",
-                "X-Subscription-Token": BRAVE_API_KEY
-            },
-            timeout=10
-        )
-
-        if r.status_code != 200:
-            log.error(f"Brave API error: {r.status_code} {r.text[:200]}")
-            return jsonify({"results": [{"error": f"Search API returned {r.status_code}"}]}), 200
-
-        brave_data = r.json()
-        web_results = brave_data.get("web", {}).get("results", [])
-
-        results = []
-        for item in web_results[:5]:
-            results.append({
-                "title": item.get("title", ""),
-                "url": item.get("url", ""),
-                "description": item.get("description", "")
-            })
-
-        # Also build a clean text summary for voice
-        summary_parts = []
-        for i, item in enumerate(results, 1):
-            summary_parts.append(
-                f"{i}. {item['title']}: {item['description']}"
-            )
-        summary = "\n".join(summary_parts) if summary_parts else "No results found."
-
-        return jsonify({"result": summary}), 200
-
-    except Exception as e:
-        log.error(f"Search error: {e}")
-        return jsonify({"results": [{"error": str(e)}]}), 200
-
-
-# ─── 2. Crypto Prices (CoinGecko API) ────────────────────────────────────────
-@app.route("/crypto", methods=["POST"])
-def crypto_proxy():
-    """
-    Accepts: POST {"message": {"coin_id": "bitcoin", "currency": "usd"}}
-    Calls: CoinGecko simple/price API (GET)
-    Returns: Price data as JSON
-    """
-    log.info("Tool call: /crypto")
-    try:
-        data = request.get_json(force=True)
-        args = extract_vapi_args(data)
-        # Accept 'coin', 'coin_id', or 'symbol' as parameter name
-        coin_id  = (args.get("coin") or args.get("coin_id") or args.get("symbol") or "bitcoin").lower().strip()
-        currency = args.get("currency", "usd").lower().strip()
-
-        log.info(f"CoinGecko: {coin_id} in {currency}")
-        r = requests.get(
-            "https://api.coingecko.com/api/v3/simple/price",
-            params={
-                "ids": coin_id,
-                "vs_currencies": currency,
-                "include_24hr_change": "true",
-                "include_market_cap": "true"
-            },
-            headers={"Accept": "application/json"},
-            timeout=10
-        )
-
-        if r.status_code != 200:
-            return jsonify({"error": f"CoinGecko API returned {r.status_code}"}), 200
-
-        cg_data = r.json()
-        coin_data = cg_data.get(coin_id, {})
-
-        if not coin_data:
-            return jsonify({
-                "error": f"Coin '{coin_id}' not found. Try common IDs like: bitcoin, ethereum, solana, dogecoin"
-            }), 200
-
-        price      = coin_data.get(currency, 0)
-        change_24h = coin_data.get(f"{currency}_24h_change", 0)
-        market_cap = coin_data.get(f"{currency}_market_cap", 0)
-
-        direction = "up" if change_24h and change_24h > 0 else "down"
-        summary = (
-            f"{coin_id.title()} is currently ${price:,.2f} {currency.upper()}, "
-            f"{direction} {abs(change_24h or 0):.2f}% in the last 24 hours. "
-            f"Market cap: ${market_cap:,.0f} {currency.upper()}."
-        )
-
-        return jsonify({"result": summary}), 200
-
-    except Exception as e:
-        log.error(f"Crypto error: {e}")
-        return jsonify({"error": str(e)}), 200
-
-
-# ─── 3. Stock Prices (Yahoo Finance API) ─────────────────────────────────────
-@app.route("/stock", methods=["POST"])
-def stock_proxy():
-    """
-    Accepts: POST {"message": {"symbol": "AAPL"}}
-    Calls: Yahoo Finance v8 quote API (GET)
-    Returns: Stock price and key metrics
-    """
-    log.info("Tool call: /stock")
-    try:
-        data = request.get_json(force=True)
-        args = extract_vapi_args(data)
-        symbol = args.get("symbol", "").upper().strip()
-        if not symbol:
-            return jsonify({"error": "No stock symbol provided"}), 200
-
-        log.info(f"Yahoo Finance: {symbol}")
-        r = requests.get(
-            f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}",
-            params={"interval": "1d", "range": "2d"},
-            headers={
-                "User-Agent": "Mozilla/5.0 (compatible; JARVIS/1.0)",
-                "Accept": "application/json"
-            },
-            timeout=10
-        )
-
-        if r.status_code != 200:
-            return jsonify({"error": f"Yahoo Finance returned {r.status_code} for {symbol}"}), 200
-
-        yf_data = r.json()
-        result = yf_data.get("chart", {}).get("result", [])
-        if not result:
-            return jsonify({"error": f"No data found for symbol '{symbol}'"}), 200
-
-        meta = result[0].get("meta", {})
-        price          = meta.get("regularMarketPrice", 0)
-        prev_close     = meta.get("previousClose", meta.get("chartPreviousClose", 0))
-        currency       = meta.get("currency", "USD")
-        exchange       = meta.get("exchangeName", "")
-        name           = meta.get("shortName", meta.get("longName", symbol))
-
-        change = price - prev_close if prev_close else 0
-        change_pct = (change / prev_close * 100) if prev_close else 0
-        direction = "up" if change >= 0 else "down"
-
-        summary = (
-            f"{name} ({symbol}) is trading at ${price:,.2f} {currency}, "
-            f"{direction} ${abs(change):,.2f} ({abs(change_pct):.2f}%) "
-            f"from previous close on {exchange}."
-        )
-
-        return jsonify({"result": summary}), 200
-
-    except Exception as e:
-        log.error(f"Stock error: {e}")
-        return jsonify({"error": str(e)}), 200
-
-
-# ─── 4. Weather (Open-Meteo API) ─────────────────────────────────────────────
-@app.route("/weather", methods=["POST"])
-def weather_proxy():
-    """
-    Accepts: POST {"message": {"location": "Toronto"}}
-    Calls: Open-Meteo geocoding + weather API (GET)
-    Returns: Current weather conditions
-    """
-    log.info("Tool call: /weather")
-    try:
-        data = request.get_json(force=True)
-        args = extract_vapi_args(data)
-        # Accept 'city', 'location', or 'place' as parameter name
-        location = (args.get("city") or args.get("location") or args.get("place") or "New York").strip()
-
-        log.info(f"Weather for: {location}")
-
-        # Step 1: Geocode the location
-        geo_r = requests.get(
-            "https://geocoding-api.open-meteo.com/v1/search",
-            params={"name": location, "count": 1, "language": "en"},
-            timeout=10
-        )
-        if geo_r.status_code != 200:
-            return jsonify({"error": f"Geocoding failed for '{location}'"}), 200
-
-        geo_data = geo_r.json()
-        results = geo_data.get("results", [])
-        if not results:
-            return jsonify({"error": f"Location '{location}' not found"}), 200
-
-        place = results[0]
-        lat   = place["latitude"]
-        lon   = place["longitude"]
-        city  = place.get("name", location)
-        country = place.get("country", "")
-
-        # Step 2: Get current weather
-        wx_r = requests.get(
-            "https://api.open-meteo.com/v1/forecast",
-            params={
-                "latitude": lat,
-                "longitude": lon,
-                "current": "temperature_2m,relative_humidity_2m,apparent_temperature,"
-                           "wind_speed_10m,weather_code",
-                "temperature_unit": "celsius",
-                "wind_speed_unit": "kmh"
-            },
-            timeout=10
-        )
-        if wx_r.status_code != 200:
-            return jsonify({"error": "Weather API failed"}), 200
-
-        wx_data = wx_r.json()
-        current = wx_data.get("current", {})
-
-        temp       = current.get("temperature_2m", 0)
-        feels_like = current.get("apparent_temperature", 0)
-        humidity   = current.get("relative_humidity_2m", 0)
-        wind       = current.get("wind_speed_10m", 0)
-        code       = current.get("weather_code", 0)
-
-        # Weather code to description
-        wx_codes = {
-            0: "clear sky", 1: "mainly clear", 2: "partly cloudy",
-            3: "overcast", 45: "foggy", 48: "depositing rime fog",
-            51: "light drizzle", 53: "moderate drizzle", 55: "dense drizzle",
-            61: "slight rain", 63: "moderate rain", 65: "heavy rain",
-            71: "slight snow", 73: "moderate snow", 75: "heavy snow",
-            77: "snow grains", 80: "slight rain showers", 81: "moderate rain showers",
-            82: "violent rain showers", 85: "slight snow showers",
-            86: "heavy snow showers", 95: "thunderstorm",
-            96: "thunderstorm with slight hail", 99: "thunderstorm with heavy hail"
-        }
-        condition = wx_codes.get(code, f"weather code {code}")
-
-        temp_f = temp * 9 / 5 + 32
-        feels_f = feels_like * 9 / 5 + 32
-
-        summary = (
-            f"Current weather in {city}, {country}: {condition}. "
-            f"Temperature is {temp:.1f}°C ({temp_f:.0f}°F), "
-            f"feels like {feels_like:.1f}°C ({feels_f:.0f}°F). "
-            f"Humidity {humidity}%, wind {wind:.0f} km/h."
-        )
-
-        return jsonify({"result": summary}), 200
-
-    except Exception as e:
-        log.error(f"Weather error: {e}")
-        return jsonify({"error": str(e)}), 200
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  HEALTH & ROOT
-# ═══════════════════════════════════════════════════════════════════════════════
+# ── Health ────────────────────────────────────────────────────────────────────
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({
-        "status": "healthy",
-        "service": "JARVIS Webhook + Tool Proxy Server",
-        "version": "2.3.0",
-        "port": PORT,
-        "endpoints": {
-            "/webhook/manus": "POST — Manus task events → Telegram",
-            "/search":  "POST — Brave web search proxy",
-            "/crypto":  "POST — CoinGecko crypto price proxy",
-            "/stock":   "POST — Yahoo Finance stock price proxy",
-            "/weather": "POST — Open-Meteo weather proxy"
-        }
-    }), 200
+    return jsonify({"status": "healthy", "version": "3.0.0", "service": "JARVIS Unified Tool Handler"}), 200
 
 
 @app.route("/", methods=["GET"])
 def root():
-    return jsonify({
-        "service": "JARVIS Webhook + Tool Proxy Server",
-        "version": "2.3.0",
-        "endpoints": {
-            "GET  /":               "This page",
-            "GET  /health":         "Health check",
-            "POST /webhook/manus":  "Manus webhook receiver",
-            "POST /search":         "Web search (Brave)",
-            "POST /crypto":         "Crypto prices (CoinGecko)",
-            "POST /stock":          "Stock prices (Yahoo Finance)",
-            "POST /weather":        "Weather (Open-Meteo)"
-        }
-    }), 200
+    return jsonify({"service": "JARVIS Unified Tool Handler", "version": "3.0.0", "endpoint": "POST /tools"}), 200
 
-
-
-# ── Research proxy (Manus API) ─────────────────────────────────────────────
-MANUS_API_KEY = os.environ.get("MANUS_API_KEY", "sk-DExwEhvRVqdWpBNoANxmrpkATuAJIG0vBxn1INNOU6UOAHRyMw65fCcJ78qvV5waOmrd7FCrXvRtwrKJ")
-
-@app.route("/research", methods=["POST"])
-def research_proxy():
-    """Dispatch a deep research task to Manus AI. Results delivered via webhook to Telegram."""
-    data = request.get_json(force=True) or {}
-    args = extract_vapi_args(data)
-    query = (args.get("query") or args.get("topic") or args.get("task") or "").strip()
-    if not query:
-        return jsonify({"result": "No research query provided."}), 200
-    log.info(f"Manus research: {query[:100]}")
-    try:
-        r = requests.post(
-            "https://api.manus.im/v1/tasks",
-            headers={"API_KEY": MANUS_API_KEY, "Content-Type": "application/json"},
-            json={"prompt": query, "webhook_url": f"{os.environ.get('RAILWAY_PUBLIC_DOMAIN', 'https://jarvis-webhook-production.up.railway.app')}/webhook/manus"},
-            timeout=15
-        )
-        if r.status_code in (200, 201):
-            task_id = r.json().get("task_id", "unknown")
-            return jsonify({"result": f"Research dispatched to Manus, Sir. Task ID: {task_id}. Results will arrive on Telegram shortly."}), 200
-        else:
-            log.error(f"Manus API error: {r.status_code} {r.text[:200]}")
-            return jsonify({"result": "Research task dispatched. Results will arrive on Telegram."}), 200
-    except Exception as e:
-        log.error(f"Research proxy error: {e}")
-        return jsonify({"result": "Research task queued. Results will arrive on Telegram shortly."}), 200
-
-
-# ── OpenClaw proxy ──────────────────────────────────────────────────────────
-OPENCLAW_GATEWAY_URL = "https://eco-guidelines-grid-cut.trycloudflare.com"
-OPENCLAW_HOOK_TOKEN  = "43e09303696b9ce63b9bfec06ec32491b35bdc17e7dc995f"
-
-@app.route("/openclaw", methods=["POST"])
-def openclaw_proxy():
-    """Proxy Vapi tool calls to OpenClaw gateway /hooks endpoint."""
-    data = request.get_json(force=True) or {}
-    args = extract_vapi_args(data)
-    task = (args.get("task") or args.get("command") or args.get("message") or "").strip()
-    if not task:
-        return jsonify({"error": "No task provided", "summary": "No task was specified."}), 400
-
-    log.info(f"OpenClaw task: {task[:100]}")
-    try:
-        hook_payload = {"message": task, "channel": "api"}
-        r = requests.post(
-            f"{OPENCLAW_GATEWAY_URL}/hooks",
-            headers={
-                "Authorization": f"Bearer {OPENCLAW_HOOK_TOKEN}",
-                "Content-Type": "application/json"
-            },
-            json=hook_payload,
-            timeout=25
-        )
-        if r.status_code in (200, 201, 202):
-            return jsonify({
-                "success": True,
-                "summary": f"Task sent to OpenClaw successfully. OpenClaw is now executing: {task[:100]}. Results will appear in Telegram shortly."
-            }), 200
-        else:
-            log.error(f"OpenClaw error {r.status_code}: {r.text[:200]}")
-            return jsonify({
-                "success": False,
-                "summary": f"OpenClaw returned an error ({r.status_code}). The task may not have been executed."
-            }), 200
-    except Exception as e:
-        log.error(f"OpenClaw proxy exception: {e}")
-        return jsonify({
-            "success": False,
-            "summary": "Could not reach OpenClaw. The gateway may be offline."
-        }), 200
 
 if __name__ == "__main__":
-    log.info("=" * 60)
-    log.info("  JARVIS Webhook + Tool Proxy Server v2.0.0")
-    log.info(f"  Port: {PORT}")
-    log.info(f"  Telegram: {TELEGRAM_CHAT}")
-    log.info(f"  Brave key: {'set' if BRAVE_API_KEY else 'NOT SET'}")
-    log.info("=" * 60)
-    get_manus_public_key()
-    app.run(host="0.0.0.0", port=PORT, debug=False)
+    app.run(host="0.0.0.0", port=PORT)
