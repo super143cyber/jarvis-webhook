@@ -8,6 +8,8 @@ import os
 import json
 import logging
 import requests
+import threading
+from openai import OpenAI
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
@@ -293,6 +295,62 @@ def manus_webhook():
     send_telegram(msg)
     return jsonify({"ok": True}), 200
 
+
+def process_research_async(query, chat_id, bot_token):
+    try:
+        # Initialize OpenAI client (API key is pulled from environment variables)
+        client = OpenAI()
+        
+        prompt = f"Perform comprehensive research on the following topic and generate a detailed, well-structured report. Topic: {query}"
+        
+        response = client.chat.completions.create(
+            model="gpt-4.1-mini",
+            messages=[
+                {"role": "system", "content": "You are an expert AI researcher. Provide a detailed, well-structured report on the requested topic. Use plain text formatting suitable for Telegram (no markdown that breaks Telegram)."},
+                {"role": "user", "content": prompt}
+            ]
+        )
+        
+        report = response.choices[0].message.content
+        
+        # Split report into chunks of 4000 characters to respect Telegram limits
+        chunk_size = 4000
+        chunks = [report[i:i+chunk_size] for i in range(0, len(report), chunk_size)]
+        
+        for chunk in chunks:
+            requests.post(
+                f"https://api.telegram.org/bot{bot_token}/sendMessage",
+                json={"chat_id": chat_id, "text": chunk},
+                timeout=10
+            )
+            
+    except Exception as e:
+        log.error(f"Async research error: {e}")
+        try:
+            requests.post(
+                f"https://api.telegram.org/bot{bot_token}/sendMessage",
+                json={"chat_id": chat_id, "text": f"Error performing research on '{query}': {str(e)}"},
+                timeout=10
+            )
+        except Exception:
+            pass
+
+@app.route("/research", methods=["POST"])
+def research_endpoint():
+    data = request.get_json(force=True) or {}
+    query = data.get("query")
+    chat_id = data.get("chat_id")
+    bot_token = data.get("bot_token")
+    
+    if not query or not chat_id or not bot_token:
+        return jsonify({"error": "Missing required fields: query, chat_id, bot_token"}), 400
+        
+    # Start async processing
+    thread = threading.Thread(target=process_research_async, args=(query, chat_id, bot_token))
+    thread.start()
+    
+    # Return immediately
+    return jsonify({"status": "dispatched"}), 200
 
 @app.route("/health", methods=["GET"])
 def health():
