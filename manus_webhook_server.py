@@ -32,7 +32,7 @@ MANUS_BASE              = "https://api.manus.ai"
 BOT_TOKEN               = os.environ.get("BOT_TOKEN", "")
 TELEGRAM_CHAT           = os.environ.get("TELEGRAM_CHAT", "")
 PORT                    = int(os.environ.get("PORT", 8765))
-REGISTERED_WEBHOOK_URL  = os.environ.get("REGISTERED_WEBHOOK_URL", "")
+REGISTERED_WEBHOOK_URL  = os.environ.get("REGISTERED_WEBHOOK_URL", "https://jarvis-webhook-production.up.railway.app/webhook/manus")
 SKIP_SIG_VERIFY         = os.environ.get("SKIP_SIG_VERIFY", "false").lower() == "true"
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
