@@ -509,6 +509,49 @@ def root():
     }), 200
 
 
+
+# ── OpenClaw proxy ──────────────────────────────────────────────────────────
+OPENCLAW_GATEWAY_URL = "https://eco-guidelines-grid-cut.trycloudflare.com"
+OPENCLAW_HOOK_TOKEN  = "43e09303696b9ce63b9bfec06ec32491b35bdc17e7dc995f"
+
+@app.route("/openclaw", methods=["POST"])
+def openclaw_proxy():
+    """Proxy Vapi tool calls to OpenClaw gateway /hooks endpoint."""
+    data = request.get_json(force=True) or {}
+    task = data.get("task", "")
+    if not task:
+        return jsonify({"error": "No task provided", "summary": "No task was specified."}), 400
+
+    log.info(f"OpenClaw task: {task[:100]}")
+    try:
+        hook_payload = {"message": task, "channel": "api"}
+        r = requests.post(
+            f"{OPENCLAW_GATEWAY_URL}/hooks",
+            headers={
+                "Authorization": f"Bearer {OPENCLAW_HOOK_TOKEN}",
+                "Content-Type": "application/json"
+            },
+            json=hook_payload,
+            timeout=25
+        )
+        if r.status_code in (200, 201, 202):
+            return jsonify({
+                "success": True,
+                "summary": f"Task sent to OpenClaw successfully. OpenClaw is now executing: {task[:100]}. Results will appear in Telegram shortly."
+            }), 200
+        else:
+            log.error(f"OpenClaw error {r.status_code}: {r.text[:200]}")
+            return jsonify({
+                "success": False,
+                "summary": f"OpenClaw returned an error ({r.status_code}). The task may not have been executed."
+            }), 200
+    except Exception as e:
+        log.error(f"OpenClaw proxy exception: {e}")
+        return jsonify({
+            "success": False,
+            "summary": "Could not reach OpenClaw. The gateway may be offline."
+        }), 200
+
 if __name__ == "__main__":
     log.info("=" * 60)
     log.info("  JARVIS Webhook + Tool Proxy Server v2.0.0")
