@@ -298,30 +298,60 @@ def manus_webhook():
 
 def process_research_async(query, chat_id, bot_token):
     try:
-        # Initialize OpenAI client (API key is pulled from environment variables)
-        client = OpenAI()
+        # Initialize OpenAI client using the real OpenAI API
+        openai_key = os.environ.get("OPENAI_API_KEY", "")
+        client = OpenAI(
+            api_key=openai_key,
+            base_url="https://api.openai.com/v1"
+        )
         
-        prompt = f"Perform comprehensive research on the following topic and generate a detailed, well-structured report. Topic: {query}"
+        prompt = (
+            f"Perform comprehensive research on the following topic and generate a detailed, "
+            f"well-structured report. Cover: background/overview, key facts, current status, "
+            f"analysis, pros/cons or risks/opportunities, and a conclusion/outlook.\n\n"
+            f"Topic: {query}\n\n"
+            f"Format the report with clear section headers using ALL CAPS followed by a colon "
+            f"(e.g. OVERVIEW:, KEY FACTS:, ANALYSIS:). Use plain text only - no asterisks, "
+            f"no markdown, no hashtags. Write in full paragraphs."
+        )
         
         response = client.chat.completions.create(
             model="gpt-4.1-mini",
             messages=[
-                {"role": "system", "content": "You are an expert AI researcher. Provide a detailed, well-structured report on the requested topic. Use plain text formatting suitable for Telegram (no markdown that breaks Telegram)."},
+                {
+                    "role": "system",
+                    "content": (
+                        "You are JARVIS, an expert AI research analyst. Produce comprehensive, "
+                        "well-structured research reports. Use plain text formatting only - "
+                        "no markdown asterisks, no hashtags, no special characters that would "
+                        "break Telegram display. Use ALL CAPS section headers followed by colons. "
+                        "Be thorough, analytical, and insightful."
+                    )
+                },
                 {"role": "user", "content": prompt}
-            ]
+            ],
+            max_tokens=4000
         )
         
         report = response.choices[0].message.content
         
+        # Send header message
+        header = f"JARVIS RESEARCH REPORT\nTopic: {query}\n" + "="*40
+        requests.post(
+            f"https://api.telegram.org/bot{bot_token}/sendMessage",
+            json={"chat_id": chat_id, "text": header},
+            timeout=10
+        )
+        
         # Split report into chunks of 4000 characters to respect Telegram limits
-        chunk_size = 4000
+        chunk_size = 3800
         chunks = [report[i:i+chunk_size] for i in range(0, len(report), chunk_size)]
         
-        for chunk in chunks:
+        for i, chunk in enumerate(chunks, 1):
             requests.post(
                 f"https://api.telegram.org/bot{bot_token}/sendMessage",
                 json={"chat_id": chat_id, "text": chunk},
-                timeout=10
+                timeout=15
             )
             
     except Exception as e:
@@ -329,7 +359,7 @@ def process_research_async(query, chat_id, bot_token):
         try:
             requests.post(
                 f"https://api.telegram.org/bot{bot_token}/sendMessage",
-                json={"chat_id": chat_id, "text": f"Error performing research on '{query}': {str(e)}"},
+                json={"chat_id": chat_id, "text": f"Research error for '{query}': {str(e)}"},
                 timeout=10
             )
         except Exception:
@@ -344,12 +374,18 @@ def research_endpoint():
     
     if not query or not chat_id or not bot_token:
         return jsonify({"error": "Missing required fields: query, chat_id, bot_token"}), 400
-        
-    # Start async processing
-    thread = threading.Thread(target=process_research_async, args=(query, chat_id, bot_token))
+    
+    log.info(f"Research dispatched: {query[:80]}")
+    
+    # Start async processing in background thread
+    thread = threading.Thread(
+        target=process_research_async,
+        args=(query, chat_id, bot_token),
+        daemon=True
+    )
     thread.start()
     
-    # Return immediately
+    # Return immediately to avoid Vapi timeout
     return jsonify({"status": "dispatched"}), 200
 
 @app.route("/health", methods=["GET"])
