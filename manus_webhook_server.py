@@ -19,6 +19,7 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "7730428672:AAFaKvzBnX
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "1476514914")
 OPENCLAW_GATEWAY_URL = os.environ.get("OPENCLAW_GATEWAY_URL", "https://eco-guidelines-grid-cut.trycloudflare.com")
 OPENCLAW_HOOK_TOKEN = os.environ.get("OPENCLAW_HOOK_TOKEN", "43e09303696b9ce63b9bfec06ec32491b35bdc17e7dc995f")
+BRAVE_API_KEY = os.environ.get("BRAVE_API_KEY", "BSAjBNPwOGXAxrOvBeujPlitG43sgEv")
 
 
 def vapi_response(tool_call_id, result_text):
@@ -194,22 +195,24 @@ def unified_tools():
             if not query:
                 return vapi_response(call_id, "Please provide a search query.")
             r = requests.get(
-                "https://api.duckduckgo.com/",
-                params={"q": query, "format": "json", "no_html": 1, "skip_disambig": 1},
+                "https://api.search.brave.com/res/v1/web/search",
+                headers={"Accept": "application/json", "X-Subscription-Token": BRAVE_API_KEY},
+                params={"q": query, "count": 5, "text_decorations": False},
                 timeout=10
             )
-            d = r.json()
-            abstract = d.get("AbstractText", "")
-            answer = d.get("Answer", "")
-            related = [rt.get("Text", "") for rt in d.get("RelatedTopics", [])[:3] if rt.get("Text")]
-            if answer:
-                result = answer
-            elif abstract:
-                result = abstract
-            elif related:
-                result = " | ".join(related[:2])
+            r.raise_for_status()
+            data = r.json()
+            web_results = data.get("web", {}).get("results", [])
+            if web_results:
+                snippets = []
+                for wr in web_results[:3]:
+                    title = wr.get("title", "")
+                    desc = wr.get("description", "")
+                    if desc:
+                        snippets.append(f"{title}: {desc}")
+                result = " | ".join(snippets) if snippets else "No results found."
             else:
-                result = f"I searched for '{query}' but couldn't find a direct answer. Please check online for the latest information."
+                result = f"No web results found for '{query}'."
             return vapi_response(call_id, result)
 
         elif tool_name == "deep_research":
@@ -258,12 +261,12 @@ def manus_webhook():
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "healthy", "version": "4.0.0", "service": "JARVIS Unified Tool Handler"}), 200
+    return jsonify({"status": "healthy", "version": "4.1.0", "service": "JARVIS Unified Tool Handler"}), 200
 
 
 @app.route("/", methods=["GET"])
 def root():
-    return jsonify({"service": "JARVIS Unified Tool Handler", "version": "4.0.0", "endpoint": "POST /tools"}), 200
+    return jsonify({"service": "JARVIS Unified Tool Handler", "version": "4.1.0", "endpoint": "POST /tools"}), 200
 
 
 if __name__ == "__main__":
