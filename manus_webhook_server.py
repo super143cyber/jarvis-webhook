@@ -227,10 +227,11 @@ def unified_tools():
                 rank = int(rank)
             except Exception:
                 return vapi_response(call_id, "Please provide a valid rank number.")
+            per_page = min(250, max(rank + 5, 50))
             r = requests.get(
                 "https://api.coingecko.com/api/v3/coins/markets",
-                params={"vs_currency": "usd", "order": "market_cap_desc", "per_page": rank + 5, "page": 1, "sparkline": False},
-                timeout=12
+                params={"vs_currency": "usd", "order": "market_cap_desc", "per_page": per_page, "page": 1, "sparkline": False},
+                timeout=15
             )
             r.raise_for_status()
             coins = r.json()
@@ -295,12 +296,12 @@ def manus_webhook():
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "healthy", "version": "4.2.0", "service": "JARVIS Unified Tool Handler"}), 200
+    return jsonify({"status": "healthy", "version": "4.2.1", "service": "JARVIS Unified Tool Handler"}), 200
 
 
 @app.route("/", methods=["GET"])
 def root():
-    return jsonify({"service": "JARVIS Unified Tool Handler", "version": "4.2.0", "endpoint": "POST /tools"}), 200
+    return jsonify({"service": "JARVIS Unified Tool Handler", "version": "4.2.1", "endpoint": "POST /tools"}), 200
 
 
 if __name__ == "__main__":
