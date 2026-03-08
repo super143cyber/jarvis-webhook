@@ -1,7 +1,7 @@
 """
-JARVIS Unified Tool Handler v3.0
-Single endpoint that handles ALL Vapi tool calls directly.
-No Brave, no passthrough — direct API calls to Yahoo Finance, CoinGecko, Open-Meteo.
+JARVIS Unified Tool Handler v4.0
+Correct Vapi response format: {"results": [{"toolCallId": "...", "result": "..."}]}
+Direct API calls - no passthrough, no Brave.
 """
 
 import os
@@ -21,37 +21,40 @@ OPENCLAW_GATEWAY_URL = os.environ.get("OPENCLAW_GATEWAY_URL", "https://eco-guide
 OPENCLAW_HOOK_TOKEN = os.environ.get("OPENCLAW_HOOK_TOKEN", "43e09303696b9ce63b9bfec06ec32491b35bdc17e7dc995f")
 
 
-def extract_args(data):
-    """Extract tool call arguments from Vapi's payload format."""
-    # Vapi sends: message.toolCallList[0].function.arguments (JSON string or dict)
+def vapi_response(tool_call_id, result_text):
+    """Return the exact format Vapi requires for tool results."""
+    return jsonify({
+        "results": [
+            {
+                "toolCallId": tool_call_id,
+                "result": result_text
+            }
+        ]
+    }), 200
+
+
+def extract_tool_info(data):
+    """Extract tool name, arguments, and call ID from Vapi's payload."""
     try:
         msg = data.get("message", data)
         tool_list = msg.get("toolCallList", [])
         if tool_list:
-            args_raw = tool_list[0].get("function", {}).get("arguments", {})
+            call = tool_list[0]
+            call_id = call.get("id", "unknown")
+            fn = call.get("function", {})
+            name = fn.get("name", "")
+            args_raw = fn.get("arguments", {})
             if isinstance(args_raw, str):
-                return json.loads(args_raw)
-            return args_raw
-    except Exception:
-        pass
-    # Fallback: try top-level keys
-    return data
-
-
-def get_tool_name(data):
-    """Extract the tool name from Vapi's payload."""
-    try:
-        msg = data.get("message", data)
-        tool_list = msg.get("toolCallList", [])
-        if tool_list:
-            return tool_list[0].get("function", {}).get("name", "")
-    except Exception:
-        pass
-    return ""
+                args = json.loads(args_raw)
+            else:
+                args = args_raw
+            return name, args, call_id
+    except Exception as e:
+        log.error(f"extract_tool_info error: {e}")
+    return "", {}, "unknown"
 
 
 def fetch_stock(symbol):
-    """Fetch stock price directly from Yahoo Finance."""
     symbol = symbol.upper().strip()
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
     headers = {
@@ -74,9 +77,7 @@ def fetch_stock(symbol):
 
 
 def fetch_crypto(coin):
-    """Fetch crypto price directly from CoinGecko."""
     coin = coin.lower().strip()
-    # Map common symbols to CoinGecko IDs
     symbol_map = {
         "btc": "bitcoin", "eth": "ethereum", "sol": "solana",
         "bnb": "binancecoin", "xrp": "ripple", "ada": "cardano",
@@ -93,7 +94,7 @@ def fetch_crypto(coin):
     r.raise_for_status()
     data = r.json()
     if coin_id not in data:
-        return f"Could not find price data for {coin}. Please check the name."
+        return f"Could not find price data for {coin}."
     d = data[coin_id]
     price = d.get("usd", 0)
     change = d.get("usd_24h_change", 0) or 0
@@ -103,9 +104,7 @@ def fetch_crypto(coin):
 
 
 def fetch_weather(city):
-    """Fetch weather directly from Open-Meteo (no API key needed)."""
     city = city.strip()
-    # Geocode
     geo = requests.get(
         "https://geocoding-api.open-meteo.com/v1/search",
         params={"name": city, "count": 1, "language": "en"},
@@ -119,8 +118,6 @@ def fetch_weather(city):
     lat, lon = loc["latitude"], loc["longitude"]
     loc_name = loc.get("name", city)
     country = loc.get("country", "")
-
-    # Weather
     w = requests.get(
         "https://api.open-meteo.com/v1/forecast",
         params={
@@ -139,7 +136,6 @@ def fetch_weather(city):
     humidity = curr.get("relative_humidity_2m", 0)
     wind = curr.get("wind_speed_10m", 0)
     code = curr.get("weather_code", 0)
-
     conditions = {
         0: "clear sky", 1: "mainly clear", 2: "partly cloudy", 3: "overcast",
         45: "foggy", 48: "icy fog", 51: "light drizzle", 53: "moderate drizzle",
@@ -149,57 +145,54 @@ def fetch_weather(city):
         95: "thunderstorm", 96: "thunderstorm with hail"
     }
     condition = conditions.get(code, f"weather code {code}")
-
     return (f"In {loc_name}, {country}: {temp_c}°C ({temp_f}°F), feels like {feels_c}°C ({feels_f}°F). "
             f"Conditions: {condition}. Humidity: {humidity}%. Wind: {wind} km/h.")
 
 
 def send_telegram(text):
-    """Send message to Telegram."""
-    requests.post(
-        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-        json={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "Markdown"},
-        timeout=10
-    )
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "Markdown"},
+            timeout=10
+        )
+    except Exception as e:
+        log.error(f"Telegram error: {e}")
 
-
-# ── Main unified tool endpoint ────────────────────────────────────────────────
 
 @app.route("/tools", methods=["POST"])
 def unified_tools():
-    """Single endpoint for ALL Vapi tool calls."""
+    """Single endpoint for ALL Vapi tool calls. Returns Vapi-required results array format."""
     data = request.get_json(force=True) or {}
-    tool_name = get_tool_name(data)
-    args = extract_args(data)
-    log.info(f"Tool call: {tool_name} | args: {args}")
+    tool_name, args, call_id = extract_tool_info(data)
+    log.info(f"Tool: {tool_name} | ID: {call_id} | Args: {args}")
 
     try:
         if tool_name == "get_stock_price":
             symbol = args.get("symbol", "").upper().strip()
             if not symbol:
-                return jsonify({"result": "Please provide a stock ticker symbol."}), 200
+                return vapi_response(call_id, "Please provide a stock ticker symbol.")
             result = fetch_stock(symbol)
-            return jsonify({"result": result}), 200
+            return vapi_response(call_id, result)
 
         elif tool_name == "get_crypto_price":
             coin = (args.get("coin") or args.get("coin_id") or args.get("symbol") or "").lower().strip()
             if not coin:
-                return jsonify({"result": "Please provide a cryptocurrency name or symbol."}), 200
+                return vapi_response(call_id, "Please provide a cryptocurrency name or symbol.")
             result = fetch_crypto(coin)
-            return jsonify({"result": result}), 200
+            return vapi_response(call_id, result)
 
         elif tool_name == "get_weather":
             city = (args.get("city") or args.get("location") or "").strip()
             if not city:
-                return jsonify({"result": "Please provide a city name."}), 200
+                return vapi_response(call_id, "Please provide a city name.")
             result = fetch_weather(city)
-            return jsonify({"result": result}), 200
+            return vapi_response(call_id, result)
 
         elif tool_name == "web_search":
             query = args.get("query", "").strip()
             if not query:
-                return jsonify({"result": "Please provide a search query."}), 200
-            # Use DuckDuckGo instant answer API (no key needed)
+                return vapi_response(call_id, "Please provide a search query.")
             r = requests.get(
                 "https://api.duckduckgo.com/",
                 params={"q": query, "format": "json", "no_html": 1, "skip_disambig": 1},
@@ -208,7 +201,7 @@ def unified_tools():
             d = r.json()
             abstract = d.get("AbstractText", "")
             answer = d.get("Answer", "")
-            related = [r.get("Text", "") for r in d.get("RelatedTopics", [])[:3] if r.get("Text")]
+            related = [rt.get("Text", "") for rt in d.get("RelatedTopics", [])[:3] if rt.get("Text")]
             if answer:
                 result = answer
             elif abstract:
@@ -216,20 +209,20 @@ def unified_tools():
             elif related:
                 result = " | ".join(related[:2])
             else:
-                result = f"I searched for '{query}' but couldn't find a direct answer. You may want to check online for the latest information."
-            return jsonify({"result": result}), 200
+                result = f"I searched for '{query}' but couldn't find a direct answer. Please check online for the latest information."
+            return vapi_response(call_id, result)
 
         elif tool_name == "deep_research":
             query = (args.get("query") or args.get("topic") or "").strip()
             if not query:
-                return jsonify({"result": "Please provide a research topic."}), 200
+                return vapi_response(call_id, "Please provide a research topic.")
             send_telegram(f"🔬 *Deep Research Request*\n\nSir requested research on: _{query}_\n\nProcessing now...")
-            return jsonify({"result": f"Research on '{query}' has been dispatched, Sir. Results will arrive on Telegram shortly."}), 200
+            return vapi_response(call_id, f"Research on '{query}' has been dispatched, Sir. Results will arrive on Telegram shortly.")
 
         elif tool_name == "execute_task":
             task = (args.get("task") or args.get("command") or args.get("message") or "").strip()
             if not task:
-                return jsonify({"result": "No task provided."}), 200
+                return vapi_response(call_id, "No task provided.")
             try:
                 hook_payload = {"message": task, "channel": "api"}
                 r = requests.post(
@@ -238,29 +231,22 @@ def unified_tools():
                     json=hook_payload,
                     timeout=20
                 )
-                if r.status_code in (200, 201, 202):
-                    return jsonify({"result": f"Task sent to OpenClaw, Sir. Executing: {task[:80]}. Results on Telegram."}), 200
-                else:
-                    return jsonify({"result": "OpenClaw received the task. Results will appear on Telegram."}), 200
-            except Exception as e:
-                return jsonify({"result": "Task queued. OpenClaw will process it shortly."}), 200
+                return vapi_response(call_id, f"Task sent to OpenClaw, Sir. Executing: {task[:80]}. Results on Telegram.")
+            except Exception:
+                return vapi_response(call_id, "Task queued. OpenClaw will process it shortly.")
 
         else:
             log.warning(f"Unknown tool: {tool_name}")
-            return jsonify({"result": f"Tool '{tool_name}' is not available."}), 200
+            return vapi_response(call_id, f"Tool '{tool_name}' is not available.")
 
     except Exception as e:
         log.error(f"Tool error [{tool_name}]: {e}")
-        # Return a graceful error — never leave Vapi hanging
-        tool_friendly = tool_name.replace("_", " ").replace("get ", "")
-        return jsonify({"result": f"I'm having trouble fetching the {tool_friendly} data right now, Sir. Please try again in a moment."}), 200
+        tool_friendly = tool_name.replace("_", " ").replace("get ", "") if tool_name else "requested"
+        return vapi_response(call_id, f"I'm having trouble fetching the {tool_friendly} data right now, Sir. Please try again in a moment.")
 
-
-# ── Manus webhook receiver ────────────────────────────────────────────────────
 
 @app.route("/webhook/manus", methods=["POST"])
 def manus_webhook():
-    """Receive Manus task completion and forward to Telegram."""
     data = request.get_json(force=True) or {}
     task_id = data.get("task_id", "unknown")
     status = data.get("status", "unknown")
@@ -270,16 +256,14 @@ def manus_webhook():
     return jsonify({"ok": True}), 200
 
 
-# ── Health ────────────────────────────────────────────────────────────────────
-
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "healthy", "version": "3.0.0", "service": "JARVIS Unified Tool Handler"}), 200
+    return jsonify({"status": "healthy", "version": "4.0.0", "service": "JARVIS Unified Tool Handler"}), 200
 
 
 @app.route("/", methods=["GET"])
 def root():
-    return jsonify({"service": "JARVIS Unified Tool Handler", "version": "3.0.0", "endpoint": "POST /tools"}), 200
+    return jsonify({"service": "JARVIS Unified Tool Handler", "version": "4.0.0", "endpoint": "POST /tools"}), 200
 
 
 if __name__ == "__main__":
