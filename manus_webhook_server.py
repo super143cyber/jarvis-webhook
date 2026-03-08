@@ -84,7 +84,13 @@ def fetch_crypto(coin):
         "bnb": "binancecoin", "xrp": "ripple", "ada": "cardano",
         "doge": "dogecoin", "avax": "avalanche-2", "dot": "polkadot",
         "matic": "matic-network", "link": "chainlink", "theta": "theta-token",
-        "ltc": "litecoin", "shib": "shiba-inu", "uni": "uniswap"
+        "ltc": "litecoin", "shib": "shiba-inu", "uni": "uniswap",
+        "stx": "blockstack", "stacks": "blockstack",
+        "atom": "cosmos", "near": "near", "icp": "internet-computer",
+        "ftm": "fantom", "algo": "algorand", "xlm": "stellar",
+        "hbar": "hedera-hashgraph", "egld": "elrond-erd-2",
+        "sand": "the-sandbox", "mana": "decentraland",
+        "grt": "the-graph", "axs": "axie-infinity"
     }
     coin_id = symbol_map.get(coin, coin)
     r = requests.get(
@@ -215,6 +221,34 @@ def unified_tools():
                 result = f"No web results found for '{query}'."
             return vapi_response(call_id, result)
 
+        elif tool_name == "get_crypto_rank":
+            rank = args.get("rank", 0)
+            try:
+                rank = int(rank)
+            except Exception:
+                return vapi_response(call_id, "Please provide a valid rank number.")
+            r = requests.get(
+                "https://api.coingecko.com/api/v3/coins/markets",
+                params={"vs_currency": "usd", "order": "market_cap_desc", "per_page": rank + 5, "page": 1, "sparkline": False},
+                timeout=12
+            )
+            r.raise_for_status()
+            coins = r.json()
+            if rank <= len(coins):
+                coin = coins[rank - 1]
+                name = coin.get("name", "Unknown")
+                symbol = coin.get("symbol", "").upper()
+                price = coin.get("current_price", 0)
+                mcap = coin.get("market_cap", 0)
+                change = coin.get("price_change_percentage_24h", 0) or 0
+                direction = "up" if change >= 0 else "down"
+                result = (f"The #{rank} cryptocurrency by market cap is {name} ({symbol}), "
+                         f"trading at ${price:,.4f} USD, {direction} {abs(change):.2f}% in 24h. "
+                         f"Market cap: ${mcap:,.0f}.")
+            else:
+                result = f"Could not retrieve the #{rank} cryptocurrency ranking."
+            return vapi_response(call_id, result)
+
         elif tool_name == "deep_research":
             query = (args.get("query") or args.get("topic") or "").strip()
             if not query:
@@ -261,12 +295,12 @@ def manus_webhook():
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "healthy", "version": "4.1.0", "service": "JARVIS Unified Tool Handler"}), 200
+    return jsonify({"status": "healthy", "version": "4.2.0", "service": "JARVIS Unified Tool Handler"}), 200
 
 
 @app.route("/", methods=["GET"])
 def root():
-    return jsonify({"service": "JARVIS Unified Tool Handler", "version": "4.1.0", "endpoint": "POST /tools"}), 200
+    return jsonify({"service": "JARVIS Unified Tool Handler", "version": "4.2.0", "endpoint": "POST /tools"}), 200
 
 
 if __name__ == "__main__":
