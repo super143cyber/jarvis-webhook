@@ -399,6 +399,7 @@ def stock_proxy():
         )
 
         return jsonify({
+            "result": summary,
             "symbol": symbol,
             "name": name,
             "price": round(price, 2),
@@ -502,6 +503,7 @@ def weather_proxy():
         )
 
         return jsonify({
+            "result": summary,
             "location": f"{city}, {country}",
             "temperature_c": round(temp, 1),
             "temperature_f": round(temp_f, 1),
