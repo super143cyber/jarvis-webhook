@@ -288,25 +288,60 @@ def unified_tools():
 @app.route("/webhook/manus", methods=["POST"])
 def manus_webhook():
     data = request.get_json(force=True) or {}
-    task_id = data.get("task_id", "unknown")
-    status = data.get("status", "unknown")
-    result = data.get("result") or data.get("output") or data.get("message") or str(data)[:500]
-    msg = f"🤖 *JARVIS Research Complete*\n\nTask: `{task_id}`\nStatus: {status}\n\n{result[:3000]}"
-    send_telegram(msg)
+    log.info(f"Received Manus webhook: {json.dumps(data)}")
+    
+    event_type = data.get("event_type", "unknown")
+    
+    # We only care about task_stopped for final results
+    if event_type == "task_stopped":
+        task_detail = data.get("task_detail", {})
+        task_id = task_detail.get("task_id", "unknown")
+        stop_reason = task_detail.get("stop_reason", "unknown")
+        message = task_detail.get("message", "No message provided")
+        
+        # Format the final message for Telegram
+        msg = f"🤖 *JARVIS Deep Research Complete*\n\n"
+        msg += f"Task: `{task_id}`\n"
+        msg += f"Status: {stop_reason}\n\n"
+        msg += f"{message[:3500]}" # Telegram has a 4096 char limit
+        
+        # Check for attachments
+        attachments = task_detail.get("attachments", [])
+        if attachments:
+            msg += "\n\n*Attachments:*\n"
+            for att in attachments:
+                file_name = att.get("file_name", "file")
+                url = att.get("url", "")
+                if url:
+                    msg += f"- [{file_name}]({url})\n"
+                    
+        send_telegram(msg)
+        
+    elif event_type == "task_progress":
+        # Optional: could send progress updates to Telegram, but might be too spammy
+        # Just log it for now
+        progress = data.get("progress_detail", {})
+        log.info(f"Task progress: {progress.get('message', '')}")
+        
     return jsonify({"ok": True}), 200
 
 
 def process_research_async(query, chat_id, bot_token):
     try:
-        # Initialize OpenAI client using the real OpenAI API
-        openai_key = os.environ.get("OPENAI_API_KEY", "")
-        client = OpenAI(
-            api_key=openai_key,
-            base_url="https://api.openai.com/v1"
+        manus_api_key = os.environ.get("MANUS_API_KEY", "")
+        if not manus_api_key:
+            raise ValueError("MANUS_API_KEY environment variable is not set")
+            
+        # Send initial acknowledgment to Telegram
+        header = f"🔬 *JARVIS Deep Research Initiated*\n\nTopic: _{query}_\n\nDispatching to Manus Agent..."
+        requests.post(
+            f"https://api.telegram.org/bot{bot_token}/sendMessage",
+            json={"chat_id": chat_id, "text": header, "parse_mode": "Markdown"},
+            timeout=10
         )
         
         prompt = (
-            f"Perform comprehensive research on the following topic and generate a detailed, "
+            f"Perform comprehensive web research on the following topic and generate a detailed, "
             f"well-structured report. Cover: background/overview, key facts, current status, "
             f"analysis, pros/cons or risks/opportunities, and a conclusion/outlook.\n\n"
             f"Topic: {query}\n\n"
@@ -315,44 +350,50 @@ def process_research_async(query, chat_id, bot_token):
             f"no markdown, no hashtags. Write in full paragraphs."
         )
         
-        response = client.chat.completions.create(
-            model="gpt-4.1-mini",
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are JARVIS, an expert AI research analyst. Produce comprehensive, "
-                        "well-structured research reports. Use plain text formatting only - "
-                        "no markdown asterisks, no hashtags, no special characters that would "
-                        "break Telegram display. Use ALL CAPS section headers followed by colons. "
-                        "Be thorough, analytical, and insightful."
-                    )
-                },
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=4000
-        )
+        # Create a task using Manus API
+        manus_url = "https://api.manus.ai/v1/tasks"
+        headers = {
+            "API_KEY": manus_api_key,
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "prompt": prompt,
+            "agentProfile": "manus-1.6-max"
+        }
         
-        report = response.choices[0].message.content
+        log.info(f"Sending request to Manus API for query: {query}")
+        response = requests.post(manus_url, headers=headers, json=payload, timeout=15)
+        response.raise_for_status()
         
-        # Send header message
-        header = f"JARVIS RESEARCH REPORT\nTopic: {query}\n" + "="*40
+        data = response.json()
+        task_id = data.get("task_id", "unknown")
+        task_url = data.get("task_url", "")
+        
+        # Register webhook for this task completion
+        webhook_url = "https://api.manus.ai/v1/webhooks"
+        webhook_payload = {
+            "webhook": {
+                "url": "https://jarvis-webhook-production.up.railway.app/webhook/manus"
+            }
+        }
+        
+        try:
+            wh_response = requests.post(webhook_url, headers=headers, json=webhook_payload, timeout=10)
+            wh_response.raise_for_status()
+            log.info("Webhook registered successfully")
+        except Exception as wh_e:
+            log.error(f"Failed to register webhook (might already exist): {wh_e}")
+        
+        # Notify user that task is created
+        msg = f"✅ *Task Created Successfully*\n\nTask ID: `{task_id}`\n\nI will notify you here once the comprehensive research is complete."
+        if task_url:
+            msg += f"\n\nTrack progress: [View Task]({task_url})"
+            
         requests.post(
             f"https://api.telegram.org/bot{bot_token}/sendMessage",
-            json={"chat_id": chat_id, "text": header},
+            json={"chat_id": chat_id, "text": msg, "parse_mode": "Markdown", "disable_web_page_preview": True},
             timeout=10
         )
-        
-        # Split report into chunks of 4000 characters to respect Telegram limits
-        chunk_size = 3800
-        chunks = [report[i:i+chunk_size] for i in range(0, len(report), chunk_size)]
-        
-        for i, chunk in enumerate(chunks, 1):
-            requests.post(
-                f"https://api.telegram.org/bot{bot_token}/sendMessage",
-                json={"chat_id": chat_id, "text": chunk},
-                timeout=15
-            )
             
     except Exception as e:
         log.error(f"Async research error: {e}")
