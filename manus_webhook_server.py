@@ -431,12 +431,12 @@ def research_endpoint():
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "healthy", "version": "4.2.2", "service": "JARVIS Unified Tool Handler"}), 200
+    return jsonify({"status": "healthy", "version": "5.0.0", "service": "JARVIS Unified Tool Handler", "features": ["manus-deep-research", "telegram-delivery"]}), 200
 
 
 @app.route("/", methods=["GET"])
 def root():
-    return jsonify({"service": "JARVIS Unified Tool Handler", "version": "4.2.2", "endpoint": "POST /tools"}), 200
+    return jsonify({"service": "JARVIS Unified Tool Handler", "version": "5.0.0", "endpoint": "POST /tools", "features": ["manus-deep-research", "telegram-delivery"]}), 200
 
 
 if __name__ == "__main__":
