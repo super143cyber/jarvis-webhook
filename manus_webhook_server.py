@@ -15,8 +15,8 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("jarvis")
 
 PORT = int(os.environ.get("PORT", 8080))
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "7730428672:AAFaKvzBnXYxhMzVJFgq8Ej9g3Ot5Bj5Bnk")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "1476514914")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8430951431:AAE3Jl_WI9tvbbe-Y2PjoYgDCnSDhCx1ZTA")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "623939621")
 OPENCLAW_GATEWAY_URL = os.environ.get("OPENCLAW_GATEWAY_URL", "https://eco-guidelines-grid-cut.trycloudflare.com")
 OPENCLAW_HOOK_TOKEN = os.environ.get("OPENCLAW_HOOK_TOKEN", "43e09303696b9ce63b9bfec06ec32491b35bdc17e7dc995f")
 BRAVE_API_KEY = os.environ.get("BRAVE_API_KEY", "BSAjBNPwOGXAxrOvBeujPlitG43sgEv")
@@ -296,12 +296,12 @@ def manus_webhook():
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "healthy", "version": "4.2.1", "service": "JARVIS Unified Tool Handler"}), 200
+    return jsonify({"status": "healthy", "version": "4.2.2", "service": "JARVIS Unified Tool Handler"}), 200
 
 
 @app.route("/", methods=["GET"])
 def root():
-    return jsonify({"service": "JARVIS Unified Tool Handler", "version": "4.2.1", "endpoint": "POST /tools"}), 200
+    return jsonify({"service": "JARVIS Unified Tool Handler", "version": "4.2.2", "endpoint": "POST /tools"}), 200
 
 
 if __name__ == "__main__":
