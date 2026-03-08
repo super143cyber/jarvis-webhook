@@ -267,13 +267,7 @@ def search_proxy():
             )
         summary = "\n".join(summary_parts) if summary_parts else "No results found."
 
-        return jsonify({
-            "result": summary,
-            "results": results,
-            "summary": summary,
-            "query": query,
-            "count": len(results)
-        }), 200
+        return jsonify({"result": summary}), 200
 
     except Exception as e:
         log.error(f"Search error: {e}")
@@ -331,15 +325,7 @@ def crypto_proxy():
             f"Market cap: ${market_cap:,.0f} {currency.upper()}."
         )
 
-        return jsonify({
-            "result": summary,
-            "coin": coin_id,
-            "currency": currency,
-            "price": price,
-            "change_24h_percent": round(change_24h or 0, 2),
-            "market_cap": market_cap,
-            "summary": summary
-        }), 200
+        return jsonify({"result": summary}), 200
 
     except Exception as e:
         log.error(f"Crypto error: {e}")
@@ -398,18 +384,7 @@ def stock_proxy():
             f"from previous close on {exchange}."
         )
 
-        return jsonify({
-            "result": summary,
-            "symbol": symbol,
-            "name": name,
-            "price": round(price, 2),
-            "previous_close": round(prev_close, 2),
-            "change": round(change, 2),
-            "change_percent": round(change_pct, 2),
-            "currency": currency,
-            "exchange": exchange,
-            "summary": summary
-        }), 200
+        return jsonify({"result": summary}), 200
 
     except Exception as e:
         log.error(f"Stock error: {e}")
@@ -502,18 +477,7 @@ def weather_proxy():
             f"Humidity {humidity}%, wind {wind:.0f} km/h."
         )
 
-        return jsonify({
-            "result": summary,
-            "location": f"{city}, {country}",
-            "temperature_c": round(temp, 1),
-            "temperature_f": round(temp_f, 1),
-            "feels_like_c": round(feels_like, 1),
-            "feels_like_f": round(feels_f, 1),
-            "humidity_percent": humidity,
-            "wind_speed_kmh": round(wind, 1),
-            "condition": condition,
-            "summary": summary
-        }), 200
+        return jsonify({"result": summary}), 200
 
     except Exception as e:
         log.error(f"Weather error: {e}")
@@ -529,7 +493,7 @@ def health():
     return jsonify({
         "status": "healthy",
         "service": "JARVIS Webhook + Tool Proxy Server",
-        "version": "2.2.0",
+        "version": "2.3.0",
         "port": PORT,
         "endpoints": {
             "/webhook/manus": "POST — Manus task events → Telegram",
@@ -545,7 +509,7 @@ def health():
 def root():
     return jsonify({
         "service": "JARVIS Webhook + Tool Proxy Server",
-        "version": "2.2.0",
+        "version": "2.3.0",
         "endpoints": {
             "GET  /":               "This page",
             "GET  /health":         "Health check",
