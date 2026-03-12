@@ -1,8 +1,9 @@
 """
-JARVIS Unified Tool Handler v5.1.0
-Correct Vapi response format: {"results": [{"toolCallId": "...", "result": "..."}]}
-Direct API calls - no passthrough, no Brave.
-Fix: Added /vapi-events endpoint for serverUrl. All 6 tools point to /tools.
+JARVIS Unified Tool Handler v6.0.0
+- Replaced CoinGecko with CoinMarketCap for all crypto data
+- Added get_fear_greed_index tool (CMC /v3/fear-and-greed/latest)
+- Added get_top_gainers tool (CMC /v1/cryptocurrency/trending/gainers-losers)
+- All 8 tools point to /tools endpoint
 """
 
 import os
@@ -23,6 +24,12 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "623939621")
 OPENCLAW_GATEWAY_URL = os.environ.get("OPENCLAW_GATEWAY_URL", "https://eco-guidelines-grid-cut.trycloudflare.com")
 OPENCLAW_HOOK_TOKEN = os.environ.get("OPENCLAW_HOOK_TOKEN", "43e09303696b9ce63b9bfec06ec32491b35bdc17e7dc995f")
 BRAVE_API_KEY = os.environ.get("BRAVE_API_KEY", "BSAjBNPwOGXAxrOvBeujPlitG43sgEv")
+CMC_API_KEY = os.environ.get("CMC_API_KEY", "2c6dc2f957b64f9bbdd476d8023863fe")
+
+CMC_HEADERS = {
+    "X-CMC_PRO_API_KEY": CMC_API_KEY,
+    "Accept": "application/json"
+}
 
 
 def vapi_response(tool_call_id, result_text):
@@ -80,37 +87,113 @@ def fetch_stock(symbol):
     return f"{name} ({symbol}) is trading at ${price:,.2f} {currency}, {direction} ${abs(change):.2f} ({abs(change_pct):.2f}%) from previous close."
 
 
-def fetch_crypto(coin):
-    coin = coin.lower().strip()
-    symbol_map = {
-        "btc": "bitcoin", "eth": "ethereum", "sol": "solana",
-        "bnb": "binancecoin", "xrp": "ripple", "ada": "cardano",
-        "doge": "dogecoin", "avax": "avalanche-2", "dot": "polkadot",
-        "matic": "matic-network", "link": "chainlink", "theta": "theta-token",
-        "ltc": "litecoin", "shib": "shiba-inu", "uni": "uniswap",
-        "stx": "blockstack", "stacks": "blockstack",
-        "atom": "cosmos", "near": "near", "icp": "internet-computer",
-        "ftm": "fantom", "algo": "algorand", "xlm": "stellar",
-        "hbar": "hedera-hashgraph", "egld": "elrond-erd-2",
-        "sand": "the-sandbox", "mana": "decentraland",
-        "grt": "the-graph", "axs": "axie-infinity"
+def fetch_crypto_cmc(coin):
+    """Fetch crypto price using CoinMarketCap API."""
+    coin = coin.strip().upper()
+    # Normalize common aliases
+    alias_map = {
+        "BITCOIN": "BTC", "ETHEREUM": "ETH", "SOLANA": "SOL",
+        "BINANCE COIN": "BNB", "RIPPLE": "XRP", "CARDANO": "ADA",
+        "DOGECOIN": "DOGE", "AVALANCHE": "AVAX", "POLKADOT": "DOT",
+        "POLYGON": "MATIC", "CHAINLINK": "LINK", "THETA": "THETA",
+        "LITECOIN": "LTC", "SHIBA INU": "SHIB", "UNISWAP": "UNI",
+        "STACKS": "STX", "COSMOS": "ATOM", "NEAR PROTOCOL": "NEAR",
+        "INTERNET COMPUTER": "ICP", "FANTOM": "FTM", "ALGORAND": "ALGO",
+        "STELLAR": "XLM", "HEDERA": "HBAR", "SANDBOX": "SAND",
+        "DECENTRALAND": "MANA", "THE GRAPH": "GRT", "AXIE INFINITY": "AXS"
     }
-    coin_id = symbol_map.get(coin, coin)
+    symbol = alias_map.get(coin, coin)
+
     r = requests.get(
-        "https://api.coingecko.com/api/v3/simple/price",
-        params={"ids": coin_id, "vs_currencies": "usd", "include_24hr_change": "true", "include_market_cap": "true"},
+        "https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest",
+        headers=CMC_HEADERS,
+        params={"symbol": symbol, "convert": "USD"},
         timeout=10
     )
     r.raise_for_status()
     data = r.json()
-    if coin_id not in data:
+    coins_data = data.get("data", {})
+    if symbol not in coins_data:
         return f"Could not find price data for {coin}."
-    d = data[coin_id]
-    price = d.get("usd", 0)
-    change = d.get("usd_24h_change", 0) or 0
-    mcap = d.get("usd_market_cap", 0)
+    c = coins_data[symbol]
+    name = c.get("name", symbol)
+    quote = c.get("quote", {}).get("USD", {})
+    price = quote.get("price", 0)
+    change = quote.get("percent_change_24h", 0) or 0
+    mcap = quote.get("market_cap", 0)
     direction = "up" if change >= 0 else "down"
-    return f"{coin_id.replace('-', ' ').title()} is at ${price:,.4f} USD, {direction} {abs(change):.2f}% in 24h. Market cap: ${mcap:,.0f}."
+    return (f"{name} ({symbol}) is at ${price:,.4f} USD, {direction} {abs(change):.2f}% in 24h. "
+            f"Market cap: ${mcap:,.0f}.")
+
+
+def fetch_crypto_rank_cmc(rank):
+    """Fetch crypto by market cap rank using CoinMarketCap API."""
+    rank = int(rank)
+    r = requests.get(
+        "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest",
+        headers=CMC_HEADERS,
+        params={"start": rank, "limit": 1, "convert": "USD", "sort": "market_cap"},
+        timeout=10
+    )
+    r.raise_for_status()
+    data = r.json()
+    coins = data.get("data", [])
+    if not coins:
+        return f"Could not retrieve the #{rank} cryptocurrency ranking."
+    c = coins[0]
+    name = c.get("name", "Unknown")
+    symbol = c.get("symbol", "").upper()
+    quote = c.get("quote", {}).get("USD", {})
+    price = quote.get("price", 0)
+    mcap = quote.get("market_cap", 0)
+    change = quote.get("percent_change_24h", 0) or 0
+    direction = "up" if change >= 0 else "down"
+    return (f"The #{rank} cryptocurrency by market cap is {name} ({symbol}), "
+            f"trading at ${price:,.4f} USD, {direction} {abs(change):.2f}% in 24h. "
+            f"Market cap: ${mcap:,.0f}.")
+
+
+def fetch_fear_greed_cmc():
+    """Fetch the current Crypto Fear & Greed Index from CoinMarketCap."""
+    r = requests.get(
+        "https://pro-api.coinmarketcap.com/v3/fear-and-greed/latest",
+        headers=CMC_HEADERS,
+        timeout=10
+    )
+    r.raise_for_status()
+    data = r.json()
+    fg = data.get("data", {})
+    score = fg.get("value", 0)
+    classification = fg.get("value_classification", "Unknown")
+    timestamp = fg.get("timestamp", "")
+    return (f"The current Crypto Fear & Greed Index is {score} out of 100, "
+            f"classified as '{classification}'. "
+            f"{'This indicates extreme pessimism in the market.' if score <= 25 else 'This indicates extreme optimism in the market.' if score >= 75 else 'The market sentiment is mixed.'}")
+
+
+def fetch_top_gainers_cmc():
+    """Fetch top 5 crypto gainers in the last 24h from CoinMarketCap."""
+    r = requests.get(
+        "https://pro-api.coinmarketcap.com/v1/cryptocurrency/trending/gainers-losers",
+        headers=CMC_HEADERS,
+        params={"time_period": "24h", "limit": 10, "convert": "USD"},
+        timeout=10
+    )
+    r.raise_for_status()
+    data = r.json()
+    gainers = data.get("data", {}).get("gainers", [])
+    if not gainers:
+        return "Could not retrieve top gainers data at this time."
+    top5 = gainers[:5]
+    lines = []
+    for i, c in enumerate(top5, 1):
+        name = c.get("name", "Unknown")
+        symbol = c.get("symbol", "").upper()
+        quote = c.get("quote", {}).get("USD", {})
+        price = quote.get("price", 0)
+        change = quote.get("percent_change_24h", 0) or 0
+        lines.append(f"#{i}: {name} ({symbol}) up {abs(change):.1f}% at ${price:,.4f}")
+    return "Top 5 crypto gainers in the last 24 hours: " + ". ".join(lines) + "."
 
 
 def fetch_weather(city):
@@ -186,10 +269,27 @@ def unified_tools():
             return vapi_response(call_id, result)
 
         elif tool_name == "get_crypto_price":
-            coin = (args.get("coin") or args.get("coin_id") or args.get("symbol") or "").lower().strip()
+            coin = (args.get("coin") or args.get("coin_id") or args.get("symbol") or "").strip()
             if not coin:
                 return vapi_response(call_id, "Please provide a cryptocurrency name or symbol.")
-            result = fetch_crypto(coin)
+            result = fetch_crypto_cmc(coin)
+            return vapi_response(call_id, result)
+
+        elif tool_name == "get_crypto_rank":
+            rank = args.get("rank", 0)
+            try:
+                rank = int(rank)
+            except Exception:
+                return vapi_response(call_id, "Please provide a valid rank number.")
+            result = fetch_crypto_rank_cmc(rank)
+            return vapi_response(call_id, result)
+
+        elif tool_name == "get_fear_greed_index":
+            result = fetch_fear_greed_cmc()
+            return vapi_response(call_id, result)
+
+        elif tool_name == "get_top_gainers":
+            result = fetch_top_gainers_cmc()
             return vapi_response(call_id, result)
 
         elif tool_name == "get_weather":
@@ -210,8 +310,8 @@ def unified_tools():
                 timeout=10
             )
             r.raise_for_status()
-            data = r.json()
-            web_results = data.get("web", {}).get("results", [])
+            web_data = r.json()
+            web_results = web_data.get("web", {}).get("results", [])
             if web_results:
                 snippets = []
                 for wr in web_results[:3]:
@@ -222,35 +322,6 @@ def unified_tools():
                 result = " | ".join(snippets) if snippets else "No results found."
             else:
                 result = f"No web results found for '{query}'."
-            return vapi_response(call_id, result)
-
-        elif tool_name == "get_crypto_rank":
-            rank = args.get("rank", 0)
-            try:
-                rank = int(rank)
-            except Exception:
-                return vapi_response(call_id, "Please provide a valid rank number.")
-            per_page = min(250, max(rank + 5, 50))
-            r = requests.get(
-                "https://api.coingecko.com/api/v3/coins/markets",
-                params={"vs_currency": "usd", "order": "market_cap_desc", "per_page": per_page, "page": 1, "sparkline": False},
-                timeout=15
-            )
-            r.raise_for_status()
-            coins = r.json()
-            if rank <= len(coins):
-                coin = coins[rank - 1]
-                name = coin.get("name", "Unknown")
-                symbol = coin.get("symbol", "").upper()
-                price = coin.get("current_price", 0)
-                mcap = coin.get("market_cap", 0)
-                change = coin.get("price_change_percentage_24h", 0) or 0
-                direction = "up" if change >= 0 else "down"
-                result = (f"The #{rank} cryptocurrency by market cap is {name} ({symbol}), "
-                         f"trading at ${price:,.4f} USD, {direction} {abs(change):.2f}% in 24h. "
-                         f"Market cap: ${mcap:,.0f}.")
-            else:
-                result = f"Could not retrieve the #{rank} cryptocurrency ranking."
             return vapi_response(call_id, result)
 
         elif tool_name == "deep_research":
@@ -297,7 +368,6 @@ def vapi_events():
     call_info = msg.get("call", {})
     call_id = call_info.get("id", "unknown") if isinstance(call_info, dict) else "unknown"
     log.info(f"Vapi server event: {event_type} | call: {call_id}")
-    # Always return 200 OK immediately for all server events
     return jsonify({"received": True}), 200
 
 
@@ -305,23 +375,20 @@ def vapi_events():
 def manus_webhook():
     data = request.get_json(force=True) or {}
     log.info(f"Received Manus webhook: {json.dumps(data)}")
-    
+
     event_type = data.get("event_type", "unknown")
-    
-    # We only care about task_stopped for final results
+
     if event_type == "task_stopped":
         task_detail = data.get("task_detail", {})
         task_id = task_detail.get("task_id", "unknown")
         stop_reason = task_detail.get("stop_reason", "unknown")
         message = task_detail.get("message", "No message provided")
-        
-        # Format the final message for Telegram
+
         msg = f"🤖 *JARVIS Deep Research Complete*\n\n"
         msg += f"Task: `{task_id}`\n"
         msg += f"Status: {stop_reason}\n\n"
-        msg += f"{message[:3500]}" # Telegram has a 4096 char limit
-        
-        # Check for attachments
+        msg += f"{message[:3500]}"
+
         attachments = task_detail.get("attachments", [])
         if attachments:
             msg += "\n\n*Attachments:*\n"
@@ -330,15 +397,13 @@ def manus_webhook():
                 url = att.get("url", "")
                 if url:
                     msg += f"- [{file_name}]({url})\n"
-                    
+
         send_telegram(msg)
-        
+
     elif event_type == "task_progress":
-        # Optional: could send progress updates to Telegram, but might be too spammy
-        # Just log it for now
         progress = data.get("progress_detail", {})
         log.info(f"Task progress: {progress.get('message', '')}")
-        
+
     return jsonify({"ok": True}), 200
 
 
@@ -347,15 +412,14 @@ def process_research_async(query, chat_id, bot_token):
         manus_api_key = os.environ.get("MANUS_API_KEY", "")
         if not manus_api_key:
             raise ValueError("MANUS_API_KEY environment variable is not set")
-            
-        # Send initial acknowledgment to Telegram
+
         header = f"🔬 *JARVIS Deep Research Initiated*\n\nTopic: _{query}_\n\nDispatching to Manus Agent..."
         requests.post(
             f"https://api.telegram.org/bot{bot_token}/sendMessage",
             json={"chat_id": chat_id, "text": header, "parse_mode": "Markdown"},
             timeout=10
         )
-        
+
         prompt = (
             f"Perform comprehensive web research on the following topic and generate a detailed, "
             f"well-structured report. Cover: background/overview, key facts, current status, "
@@ -365,8 +429,7 @@ def process_research_async(query, chat_id, bot_token):
             f"(e.g. OVERVIEW:, KEY FACTS:, ANALYSIS:). Use plain text only - no asterisks, "
             f"no markdown, no hashtags. Write in full paragraphs."
         )
-        
-        # Create a task using Manus API
+
         manus_url = "https://api.manus.ai/v1/tasks"
         headers = {
             "API_KEY": manus_api_key,
@@ -376,41 +439,39 @@ def process_research_async(query, chat_id, bot_token):
             "prompt": prompt,
             "agentProfile": "manus-1.6-max"
         }
-        
+
         log.info(f"Sending request to Manus API for query: {query}")
         response = requests.post(manus_url, headers=headers, json=payload, timeout=15)
         response.raise_for_status()
-        
+
         data = response.json()
         task_id = data.get("task_id", "unknown")
         task_url = data.get("task_url", "")
-        
-        # Register webhook for this task completion
+
         webhook_url = "https://api.manus.ai/v1/webhooks"
         webhook_payload = {
             "webhook": {
                 "url": "https://jarvis-webhook-production.up.railway.app/webhook/manus"
             }
         }
-        
+
         try:
             wh_response = requests.post(webhook_url, headers=headers, json=webhook_payload, timeout=10)
             wh_response.raise_for_status()
             log.info("Webhook registered successfully")
         except Exception as wh_e:
             log.error(f"Failed to register webhook (might already exist): {wh_e}")
-        
-        # Notify user that task is created
+
         msg = f"✅ *Task Created Successfully*\n\nTask ID: `{task_id}`\n\nI will notify you here once the comprehensive research is complete."
         if task_url:
             msg += f"\n\nTrack progress: [View Task]({task_url})"
-            
+
         requests.post(
             f"https://api.telegram.org/bot{bot_token}/sendMessage",
             json={"chat_id": chat_id, "text": msg, "parse_mode": "Markdown", "disable_web_page_preview": True},
             timeout=10
         )
-            
+
     except Exception as e:
         log.error(f"Async research error: {e}")
         try:
@@ -422,38 +483,52 @@ def process_research_async(query, chat_id, bot_token):
         except Exception:
             pass
 
+
 @app.route("/research", methods=["POST"])
 def research_endpoint():
     data = request.get_json(force=True) or {}
     query = data.get("query")
     chat_id = data.get("chat_id")
     bot_token = data.get("bot_token")
-    
+
     if not query or not chat_id or not bot_token:
         return jsonify({"error": "Missing required fields: query, chat_id, bot_token"}), 400
-    
+
     log.info(f"Research dispatched: {query[:80]}")
-    
-    # Start async processing in background thread
+
     thread = threading.Thread(
         target=process_research_async,
         args=(query, chat_id, bot_token),
         daemon=True
     )
     thread.start()
-    
-    # Return immediately to avoid Vapi timeout
+
     return jsonify({"status": "dispatched"}), 200
+
 
 @app.route("/health", methods=["GET"])
 def health():
+    cmc_key_set = bool(os.environ.get("CMC_API_KEY", ""))
     manus_key_set = bool(os.environ.get("MANUS_API_KEY", ""))
-    return jsonify({"status": "healthy", "version": "5.1.0", "service": "JARVIS Unified Tool Handler", "features": ["manus-deep-research", "telegram-delivery"], "manus_api_key_configured": manus_key_set}), 200
+    return jsonify({
+        "status": "healthy",
+        "version": "6.0.0",
+        "service": "JARVIS Unified Tool Handler",
+        "features": ["coinmarketcap-crypto", "fear-greed-index", "top-gainers", "manus-deep-research", "telegram-delivery"],
+        "cmc_api_key_configured": cmc_key_set,
+        "manus_api_key_configured": manus_key_set
+    }), 200
 
 
 @app.route("/", methods=["GET"])
 def root():
-    return jsonify({"service": "JARVIS Unified Tool Handler", "version": "5.1.0", "endpoints": {"tools": "POST /tools", "events": "POST /vapi-events"}, "features": ["manus-deep-research", "telegram-delivery"]}), 200
+    return jsonify({
+        "service": "JARVIS Unified Tool Handler",
+        "version": "6.0.0",
+        "endpoints": {"tools": "POST /tools", "events": "POST /vapi-events"},
+        "tools": ["get_crypto_price", "get_crypto_rank", "get_fear_greed_index", "get_top_gainers",
+                  "get_stock_price", "get_weather", "web_search", "deep_research"]
+    }), 200
 
 
 if __name__ == "__main__":
