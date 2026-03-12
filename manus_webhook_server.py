@@ -172,19 +172,25 @@ def fetch_fear_greed_cmc():
 
 
 def fetch_top_gainers_cmc():
-    """Fetch top 5 crypto gainers in the last 24h from CoinMarketCap."""
+    """Fetch top 5 crypto gainers in last 24h from top 200 coins by market cap."""
     r = requests.get(
-        "https://pro-api.coinmarketcap.com/v1/cryptocurrency/trending/gainers-losers",
+        "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest",
         headers=CMC_HEADERS,
-        params={"time_period": "24h", "limit": 10, "convert": "USD"},
-        timeout=10
+        params={"start": 1, "limit": 200, "convert": "USD", "sort": "market_cap", "sort_dir": "desc"},
+        timeout=15
     )
     r.raise_for_status()
     data = r.json()
-    gainers = data.get("data", {}).get("gainers", [])
-    if not gainers:
+    coins = data.get("data", [])
+    if not coins:
         return "Could not retrieve top gainers data at this time."
-    top5 = gainers[:5]
+    # Sort by 24h change descending to find top gainers among established coins
+    sorted_coins = sorted(
+        coins,
+        key=lambda c: c.get("quote", {}).get("USD", {}).get("percent_change_24h", 0),
+        reverse=True
+    )
+    top5 = sorted_coins[:5]
     lines = []
     for i, c in enumerate(top5, 1):
         name = c.get("name", "Unknown")
@@ -193,7 +199,7 @@ def fetch_top_gainers_cmc():
         price = quote.get("price", 0)
         change = quote.get("percent_change_24h", 0) or 0
         lines.append(f"#{i}: {name} ({symbol}) up {abs(change):.1f}% at ${price:,.4f}")
-    return "Top 5 crypto gainers in the last 24 hours: " + ". ".join(lines) + "."
+    return "Top 5 crypto gainers from the top 200 coins in the last 24 hours: " + ". ".join(lines) + "."
 
 
 def fetch_weather(city):
