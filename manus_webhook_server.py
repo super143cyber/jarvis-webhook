@@ -248,15 +248,85 @@ def fetch_weather(city):
             f"Conditions: {condition}. Humidity: {humidity}%. Wind: {wind} km/h.")
 
 
-def send_telegram(text):
+def send_telegram(text, chat_id=None, bot_token=None):
+    """Send a message to Telegram, splitting into 4000-char chunks if needed."""
+    cid = chat_id or TELEGRAM_CHAT_ID
+    token = bot_token or TELEGRAM_BOT_TOKEN
+    max_len = 4000
+    chunks = [text[i:i+max_len] for i in range(0, len(text), max_len)]
+    for chunk in chunks:
+        try:
+            requests.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json={"chat_id": cid, "text": chunk, "parse_mode": "Markdown"},
+                timeout=10
+            )
+        except Exception as e:
+            log.error(f"Telegram error: {e}")
+
+
+def run_deep_research(query, chat_id=None, bot_token=None):
+    """Perform real research using Brave Search + OpenAI and deliver full report to Telegram."""
+    cid = chat_id or TELEGRAM_CHAT_ID
+    token = bot_token or TELEGRAM_BOT_TOKEN
     try:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "Markdown"},
-            timeout=10
+        # Step 1: Gather live search data from Brave
+        search_queries = [query, query + " latest 2026", query + " analysis"]
+        all_snippets = []
+        for q in search_queries:
+            try:
+                r = requests.get(
+                    "https://api.search.brave.com/res/v1/web/search",
+                    headers={"Accept": "application/json", "X-Subscription-Token": BRAVE_API_KEY},
+                    params={"q": q, "count": 5, "text_decorations": False},
+                    timeout=10
+                )
+                r.raise_for_status()
+                results = r.json().get("web", {}).get("results", [])
+                for res in results[:5]:
+                    title = res.get("title", "")
+                    desc = res.get("description", "")
+                    url = res.get("url", "")
+                    if desc:
+                        all_snippets.append(f"[{title}] {desc} ({url})")
+            except Exception as se:
+                log.warning(f"Search error for query: {se}")
+
+        search_data = "\n".join(all_snippets[:15]) if all_snippets else "No live data available."
+
+        # Step 2: Compile report with GPT-4.1-mini
+        openai_client = OpenAI()
+        system_prompt = (
+            "You are JARVIS, an AI research assistant. Produce a comprehensive, well-structured "
+            "intelligence report. Write in plain text only — no markdown, no asterisks, no hashtags. "
+            "Use ALL CAPS section headers followed by a colon (e.g. OVERVIEW:, KEY FINDINGS:). "
+            "Write in full paragraphs. Be detailed, factual, cite specific data where available. "
+            "Target length: 600-900 words."
         )
+        user_prompt = (
+            "Compile a comprehensive research report on: " + query + "\n\n"
+            "Live search data:\n" + search_data + "\n\n"
+            "Structure: OVERVIEW, KEY FINDINGS, DETAILED ANALYSIS, RISKS AND OPPORTUNITIES, OUTLOOK AND CONCLUSION."
+        )
+        response = openai_client.chat.completions.create(
+            model="gpt-4.1-mini",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            max_tokens=1500,
+            temperature=0.4
+        )
+        report = response.choices[0].message.content
+
+        # Step 3: Send full report to Telegram
+        header = "📊 *JARVIS INTELLIGENCE REPORT*\n📅 Research: _" + query + "_\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        send_telegram(header + report, cid, token)
+        log.info(f"Deep research complete for: {query}")
+
     except Exception as e:
-        log.error(f"Telegram error: {e}")
+        log.error(f"Deep research error: {e}")
+        send_telegram("Research error for '" + query + "': " + str(e), cid, token)
 
 
 @app.route("/tools", methods=["POST"])
@@ -334,8 +404,12 @@ def unified_tools():
             query = (args.get("query") or args.get("topic") or "").strip()
             if not query:
                 return vapi_response(call_id, "Please provide a research topic.")
-            send_telegram(f"🔬 *Deep Research Request*\n\nSir requested research on: _{query}_\n\nProcessing now...")
-            return vapi_response(call_id, f"Research on '{query}' has been dispatched, Sir. Results will arrive on Telegram shortly.")
+            # Send immediate Telegram acknowledgement
+            send_telegram(f"🔬 *JARVIS Deep Research Initiated*\n\nTopic: _{query}_\n\nRunning live search and compiling report now, Sir...")
+            # Spawn async thread to do real research and deliver full report
+            t = threading.Thread(target=run_deep_research, args=(query,), daemon=True)
+            t.start()
+            return vapi_response(call_id, f"Understood, Sir. Dispatching priority research to Manus now. Results will arrive on Telegram shortly.")
 
         elif tool_name == "execute_task":
             task = (args.get("task") or args.get("command") or args.get("message") or "").strip()
@@ -414,17 +488,33 @@ def manus_webhook():
 
 
 def process_research_async(query, chat_id, bot_token):
+    """Wrapper that calls run_deep_research with explicit chat_id and bot_token."""
     try:
-        manus_api_key = os.environ.get("MANUS_API_KEY", "")
-        if not manus_api_key:
-            raise ValueError("MANUS_API_KEY environment variable is not set")
-
-        header = f"🔬 *JARVIS Deep Research Initiated*\n\nTopic: _{query}_\n\nDispatching to Manus Agent..."
+        header = f"🔬 *JARVIS Deep Research Initiated*\n\nTopic: _{query}_\n\nRunning live search and compiling report now..."
         requests.post(
             f"https://api.telegram.org/bot{bot_token}/sendMessage",
             json={"chat_id": chat_id, "text": header, "parse_mode": "Markdown"},
             timeout=10
         )
+        run_deep_research(query, chat_id=chat_id, bot_token=bot_token)
+    except Exception as e:
+        log.error(f"process_research_async error: {e}")
+        try:
+            requests.post(
+                f"https://api.telegram.org/bot{bot_token}/sendMessage",
+                json={"chat_id": chat_id, "text": f"Research error for '{query}': {str(e)}"},
+                timeout=10
+            )
+        except Exception:
+            pass
+
+
+def _process_research_async_legacy(query, chat_id, bot_token):
+    """Legacy stub kept for reference only."""
+    try:
+        manus_api_key = os.environ.get("MANUS_API_KEY", "")
+        if not manus_api_key:
+            raise ValueError("MANUS_API_KEY environment variable is not set")
 
         prompt = (
             f"Perform comprehensive web research on the following topic and generate a detailed, "
@@ -518,9 +608,9 @@ def health():
     manus_key_set = bool(os.environ.get("MANUS_API_KEY", ""))
     return jsonify({
         "status": "healthy",
-        "version": "6.0.0",
+        "version": "6.1.0",
         "service": "JARVIS Unified Tool Handler",
-        "features": ["coinmarketcap-crypto", "fear-greed-index", "top-gainers", "manus-deep-research", "telegram-delivery"],
+        "features": ["coinmarketcap-crypto", "fear-greed-index", "top-gainers", "real-deep-research", "telegram-delivery"],
         "cmc_api_key_configured": cmc_key_set,
         "manus_api_key_configured": manus_key_set
     }), 200
@@ -530,7 +620,7 @@ def health():
 def root():
     return jsonify({
         "service": "JARVIS Unified Tool Handler",
-        "version": "6.0.0",
+        "version": "6.1.0",
         "endpoints": {"tools": "POST /tools", "events": "POST /vapi-events"},
         "tools": ["get_crypto_price", "get_crypto_rank", "get_fear_greed_index", "get_top_gainers",
                   "get_stock_price", "get_weather", "web_search", "deep_research"]
